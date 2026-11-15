@@ -10,34 +10,40 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.ui.chat.ChatScreen
 import com.jimgrok.petllama.ui.screens.ServersScreen
+import kotlinx.coroutines.flow.first
 
 /**
- * Simple two-pane-ish navigation without Navigation Compose:
- *  - If no server is configured, show ServersScreen (first-run).
- *  - Otherwise show ChatScreen for the selected server.
+ * Root navigation without Navigation Compose.
+ *  - Servers always reachable (add/switch).
+ *  - Tap a server to open ChatScreen for it.
+ *  - On launch, auto-open the first configured server.
  */
 @Composable
 fun RootScreen() {
     MaterialTheme(colorScheme = darkColorScheme()) {
-        val hasServers by remember { androidx.compose.runtime.derivedStateOf { true } } // placeholder
-
-        // We keep a simple in-memory "selected server id" state at root.
         var selectedServerId by remember { mutableStateOf<Long?>(null) }
+        val context = LocalContext.current
 
-        // Load first server id from DB so we land on chat if one exists.
         LaunchedEffect(Unit) {
-            val first = androidx.compose.runtime.snapshotFlow
-            // Just query once:
-            val list = kotlinx.coroutines.flow.firstOrNull
-            val servers = kotlinx.coroutines.flow.firstOrNull
+            val first = Db.servers.observeAll().first().firstOrNull()
+            if (first != null) selectedServerId = first.id
         }
 
-        ServersScreen(
-            modifier = Modifier.fillMaxSize(),
-            onOpenChat = { serverId -> selectedServerId = serverId }
-        )
+        if (selectedServerId != null) {
+            ChatScreen(
+                modifier = Modifier.fillMaxSize(),
+                serverId = selectedServerId!!,
+                onBack = { selectedServerId = null }
+            )
+        } else {
+            ServersScreen(
+                modifier = Modifier.fillMaxSize(),
+                onOpenChat = { serverId -> selectedServerId = serverId }
+            )
+        }
     }
 }
