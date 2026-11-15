@@ -27,6 +27,19 @@ class OutgoingMessagesTest {
     }
 
     @Test
+    fun toolBubblesAreNotSentBackToTheModel() {
+        val history = listOf(
+            UiMessage(1, "user", "search cats"),
+            UiMessage(2, "tool", "found 3", toolName = "SearXNG / search", toolArgs = "{\"q\":\"cats\"}"),
+            UiMessage(3, "assistant", "Three pages.")
+        )
+        assertEquals(
+            listOf(Msg("user", "search cats"), Msg("assistant", "Three pages.")),
+            outgoingMessages(history, systemPrompt = "")
+        )
+    }
+
+    @Test
     fun streamingPlaceholderIsLeftOut() {
         val history = listOf(
             UiMessage(1, "user", "hi"),

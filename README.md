@@ -35,6 +35,32 @@ The debug APK is signed with the automatic debug key. That is enough to install 
 
 Temperature, top-p, max tokens, and the system prompt apply to the chat you are in right now. They are not saved separately on each old conversation.
 
+The wrench in the chat bar turns MCP tools on or off for the chat you have open. It starts on.
+
+## MCP tools
+
+PetLlama can hand the model tools from MCP servers on your LAN, the same idea as the llama.cpp web UI. The phone speaks MCP **Streamable HTTP**, protocol **2025-06-18**.
+
+`llama-server` only understands tool calls if you start it with `--jinja`. Example:
+
+```bash
+llama-server -m your-model.gguf --host 0.0.0.0 --port 8080 --jinja
+```
+
+`--host 0.0.0.0` makes the server listen on the LAN. `127.0.0.1` is the phone itself, so that address will not work in the app. The same rule applies to MCP servers: bind them to the LAN address (or `0.0.0.0`), not localhost.
+
+1. Open **MCP servers** from the puzzle-piece icon on the server list or in chat.
+2. Tap **+**. Name it, and paste the full URL, for example `http://192.168.1.50:3000/mcp`.
+3. If the server wants a token, paste it in **Bearer token**. It is sent as `Authorization: Bearer …` on every MCP request. Extra headers go one per line, like `X-Api-Key: abc`.
+4. Tap **Test**. A good result looks like `12 tool(s) from searx`. The switch on the card turns that server on or off. Only enabled servers are offered to the model.
+5. In chat, leave the wrench highlighted and send a message. When the model calls a tool, a short row appears with the server, the tool, the arguments, and the result. Tap the row to expand it. Stop still cuts the reply off.
+
+A GitHub MCP server often has a few dozen tools and wants a bearer token. SearXNG is usually one search tool and no token. You type the URLs yourself; the app does not guess them.
+
+If a server is down, or a tool returns an error, that text is given back to the model so it can still answer. The chat does not crash.
+
+Lots of tools use a lot of the model's context. Turn off servers you are not using.
+
 ## Build on a computer
 
 You need JDK 17 (or 21) and Android SDK platform 34. From this folder:
@@ -47,4 +73,4 @@ On Windows, use `gradlew.bat assembleDebug`.
 
 The APK is `app/build/outputs/apk/debug/app-debug.apk`.
 
-`./gradlew testDebugUnitTest` runs the client checks against a tiny fake server (health, model list, streaming chat, API key).
+`./gradlew testDebugUnitTest` runs the client checks against a tiny fake llama-server (health, model list, streaming chat, API key) and a fake MCP server (initialize, tool list, tool call, and the tool-call loop).

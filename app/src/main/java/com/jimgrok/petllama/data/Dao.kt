@@ -19,6 +19,24 @@ interface ServerDao {
 }
 
 @Dao
+interface McpServerDao {
+    @Query("SELECT * FROM mcp_servers ORDER BY id DESC")
+    fun observeAll(): Flow<List<McpServerEntity>>
+
+    @Query("SELECT * FROM mcp_servers WHERE enabled = 1 ORDER BY id ASC")
+    suspend fun listEnabled(): List<McpServerEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(server: McpServerEntity): Long
+
+    @Update
+    suspend fun update(server: McpServerEntity)
+
+    @Delete
+    suspend fun delete(server: McpServerEntity)
+}
+
+@Dao
 interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE serverId = :serverId ORDER BY updatedAt DESC")
     fun observeAll(serverId: Long): Flow<List<ConversationEntity>>
