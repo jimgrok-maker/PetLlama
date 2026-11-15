@@ -3,10 +3,15 @@ package com.jimgrok.petllama.network
 import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
 import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.MediaType
+import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okio.BufferedSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -271,10 +276,71 @@ class McpClientTest {
 
     @Test
     fun missingExceptionMessageIsStillDescribed() {
-        val text = Exception().toUserMessage()
-        assertTrue(text.contains("Exception"))
-        assertTrue(text.contains("no message"))
+        val cause = IllegalStateException()
+        val text = Exception(null as String?, cause).toUserMessage()
+        assertTrue(text.contains("java.lang.Exception"))
+        assertTrue(text.contains("java.lang.IllegalStateException"))
+        assertTrue(text.contains("(no message)"))
         assertFalse(text == "failed")
+    }
+
+    @Test
+    fun sseInitializeBodyIsNotReadOnTheCallerThread() = runBlocking {
+        val caller = Thread.currentThread().name
+        val readThreads = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val http = OkHttpClient.Builder().addInterceptor(Interceptor { chain ->
+            val response = chain.proceed(chain.request())
+            val body = response.body ?: return@Interceptor response
+            response.newBuilder().body(object : ResponseBody() {
+                override fun contentType(): MediaType? = body.contentType()
+                override fun contentLength(): Long = body.contentLength()
+                override fun source(): BufferedSource {
+                    readThreads.add(Thread.currentThread().name)
+                    return body.source()
+                }
+            }).build()
+        }).build()
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "GET") return MockResponse().setResponseCode(405)
+                val json = JsonParser.parseString(request.body.readUtf8()).asJsonObject
+                val method = json.get("method").asString
+                val id = if (json.has("id")) json.get("id").asInt else 0
+                return when (method) {
+                    "initialize" -> MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setHeader("Mcp-Session-Id", "s")
+                        .setBody(
+                            "event: message\n" +
+                                "data: {\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"logging\":{}},\"serverInfo\":{\"name\":\"Searxng\",\"version\":\"4.2.0\"}}}\n\n"
+                        )
+                    "notifications/initialized" -> MockResponse().setResponseCode(202)
+                    "tools/list" -> MockResponse()
+                        .setHeader("Content-Type", "application/json")
+                        .setBody(
+                            """{"jsonrpc":"2.0","id":$id,"result":{"tools":[{"name":"searxng_search","description":"Search","inputSchema":{"type":"object"}}]}}"""
+                        )
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        server.start()
+        val client = McpClient(
+            McpServerEntity(name = "searxng", url = server.url("/mcp").toString().trimEnd('/')),
+            http
+        )
+        try {
+            assertEquals(1, client.describe().toolCount)
+            assertTrue("body was never read", readThreads.isNotEmpty())
+            assertTrue(
+                "SSE body was read on the caller thread: $readThreads",
+                readThreads.none { it == caller }
+            )
+        } finally {
+            client.close()
+            server.shutdown()
+        }
     }
 
     @Test
