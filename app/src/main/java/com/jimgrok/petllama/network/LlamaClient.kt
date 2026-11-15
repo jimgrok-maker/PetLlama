@@ -5,6 +5,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,7 +13,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.ResponseBody
 import java.util.concurrent.TimeUnit
 
 /**
@@ -28,56 +28,44 @@ class LlamaClient(private val server: ServerEntity) {
             .build()
     }
 
-    private fun baseUrl(): String {
-        val u = server.url.trimEnd('/')
-        return u
-    }
+    private fun baseUrl(): String = server.url.trimEnd('/')
 
-    private fun authHeaders(builder: Request.Builder) {
-        if (server.apiKey.isNotBlank()) {
-            builder.header("Authorization", "Bearer ${server.apiKey}")
-        }
-    }
-
-    /** GET /health  → true if reachable */
-    suspend fun health(): Boolean = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-        val req = Request.Builder().url("$baseUrl()/health").build().apply { }
-        val r = Request.Builder().url("$baseUrl()/health").build()
-        if (server.apiKey.isNotBlank()) r
-        // (health is GET, no auth needed, but harmless to add)
-        client.newCall(r).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: java.io.IOException) {
-                if (cont.isActive) cont.cancel(e)
-            }
-            override fun onResponse(call: Call, response: Response) {
-                response.use { if (cont.isActive) cont.resume(it.isSuccessful) }
-            }
-        })
+    /** GET /health → true if reachable */
+    suspend fun health(): Boolean = suspendCancellableCoroutine { cont ->
+        client.newCall(Request.Builder().url("$baseUrl()/health").build())
+            .enqueue(object : Callback {
+                override fun onFailure(call: Call, e: java.io.IOException) {
+                    if (cont.isActive) cont.cancel(e)
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { if (cont.isActive) cont.resume(it.isSuccessful) }
+                }
+            })
     }
 
     /** GET /v1/models → list of loaded model ids */
-    suspend fun listModels(): List<ModelInfo> = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-        var req = Request.Builder().url("$baseUrl()/v1/models").build()
-        client.newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: java.io.IOException) {
-                if (cont.isActive) cont.cancel(e)
-            }
-            override fun onResponse(call: Call, response: Response) {
-                response.use {
-                    if (!isSuccessful) {
-                        if (cont.isActive) cont.resumeWithException(
-                            RuntimeException("HTTP ${code()} on /v1/models")
-                        )
-                        return
-                    }
-                    val body = body?.string().orEmpty()
-                    val parsed = runCatching {
-                        GsonHolder.gson.fromJson(body, ModelListResponse::class.java)
-                    }.getOrNull()
-                    if (cont.isActive) cont.resume(parsed?.data ?: emptyList())
+    suspend fun listModels(): List<ModelInfo> = suspendCancellableCoroutine { cont ->
+        client.newCall(Request.Builder().url("$baseUrl()/v1/models").build())
+            .enqueue(object : Callback {
+                override fun onFailure(call: Call, e: java.io.IOException) {
+                    if (cont.isActive) cont.cancel(e)
                 }
-            }
-        })
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        if (!isSuccessful) {
+                            if (cont.isActive) cont.resumeWithException(
+                                RuntimeException("HTTP ${code()} on /v1/models")
+                            )
+                            return
+                        }
+                        val body = body?.string().orEmpty()
+                        val parsed = runCatching {
+                            GsonHolder.gson.fromJson(body, ModelListResponse::class.java)
+                        }.getOrNull()
+                        if (cont.isActive) cont.resume(parsed?.data ?: emptyList())
+                    }
+                }
+            })
     }
 
     /**
@@ -101,13 +89,14 @@ class LlamaClient(private val server: ServerEntity) {
             try {
                 call.execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        throw RuntimeException("HTTP ${resp.code()} on chat: ${resp.body?.string().orEmpty().take(200)}")
+                        throw RuntimeException(
+                            "HTTP ${resp.code()} on chat: ${resp.body?.string().orEmpty().take(200)}"
+                        )
                     }
                     val source = resp.body!!.source()
                     while (!source.exhausted()) {
                         val line = source.readUtf8Line() ?: break
-                        if (line.isEmpty()) continue
-                        if (!line.startsWith("data:")) continue
+                        if (line.isEmpty() || !line.startsWith("data:")) continue
                         val payload = line.removePrefix("data:").trim()
                         if (payload == "[DONE]") break
                         val chunk = runCatching {
