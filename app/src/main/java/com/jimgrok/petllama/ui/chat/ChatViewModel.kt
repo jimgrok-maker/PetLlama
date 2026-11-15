@@ -10,6 +10,7 @@ import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.LlamaClient
 import com.jimgrok.petllama.network.ModelInfo
 import com.jimgrok.petllama.network.Msg
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -117,6 +118,14 @@ class ChatViewModel : ViewModel() {
         _state.update { it.copy(streaming = false) }
     }
 
+    private suspend fun persistAssistant(convId: Long, text: String): Long =
+        if (text.isEmpty()) -1L
+        else withContext(Dispatchers.IO) {
+            Db.conversations.insertMessage(
+                MessageEntity(conversationId = convId, role = "assistant", content = text)
+            )
+        }
+
     fun send(text: String) {
         if (text.isBlank() || _state.value.streaming) return
         val s = _state.value
@@ -132,14 +141,12 @@ class ChatViewModel : ViewModel() {
                 id
             }
 
-            // persist + append user message
             val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
             val mid = withContext(Dispatchers.IO) { Db.conversations.insertMessage(userMsg) }
             _state.update { st ->
                 st.copy(messages = st.messages + UiMessage(mid, "user", text))
             }
 
-            // build request: system + last 20 history + new user
             val history = _state.value.messages.filter { it.id >= 0 }.takeLast(20)
             val msgs = mutableListOf<Msg>()
             if (s.systemPrompt.isNotBlank()) msgs += Msg("system", s.systemPrompt)
@@ -158,10 +165,10 @@ class ChatViewModel : ViewModel() {
             _state.update { it.copy(streaming = true, error = null) }
 
             var acc = StringBuilder()
-            var persistedId = -1L
             val client = LlamaClient(server)
 
             streamJob = launch {
+                var error: String? = null
                 try {
                     client.streamChat(request).collect { token ->
                         acc.append(token)
@@ -176,75 +183,38 @@ class ChatViewModel : ViewModel() {
                             st.copy(messages = list)
                         }
                     }
-
-                    // persist final (or partial on stop) assistant text
-                    val finalText = acc.toString()
-                    if (finalText.isNotEmpty()) {
-                        persistedId = withContext(Dispatchers.IO) {
-                            Db.conversations.insertMessage(
-                                MessageEntity(conversationId = convId, role = "assistant", content = finalText)
-                            )
-                        }
-                    }
-                    finalizeAssistant(convId, finalText, persistedId)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    // stop pressed — keep partial
-                    val partial = acc.toString()
-                    if (partial.isNotEmpty()) {
-                        persistedId = withContext(Dispatchers.IO) {
-                            Db.conversations.insertMessage(
-                                MessageEntity(conversationId = convId, role = "assistant", content = partial)
-                            )
-                        }
-                    }
-                    finalizeAssistant(convId, partial, persistedId)
+                } catch (e: CancellationException) {
+                    // stop pressed — keep partial (no error)
                 } catch (e: Exception) {
-                    val partial = acc.toString()
-                    if (partial.isNotEmpty()) {
-                        persistedId = withContext(Dispatchers.IO) {
-                            Db.conversations.insertMessage(
-                                MessageEntity(conversationId = convId, role = "assistant", content = partial)
-                            )
-                        }
-                        finalizeAssistant(convId, partial, persistedId)
+                    // keep partial text, report error
+                    error = e.message ?: "stream error"
+                }
+
+                // finalize: persist partial/final, swap placeholder
+                val finalText = acc.toString()
+                val persistedId = persistAssistant(convId, finalText)
+                _state.update { st ->
+                    val list = st.messages.toMutableList()
+                    val lastIdx = list.indexOfLast { it.isStreaming }
+                    when {
+                        lastIdx >= 0 && finalText.isNotEmpty() ->
+                            list[lastIdx] = UiMessage(persistedId, "assistant", finalText)
+                        lastIdx >= 0 ->
+                            list.removeAt(lastIdx)
                     }
-                    _state.update { it.copy(error = e.message ?: "stream error") }
-                } finally {
-                    _state.update { it.copy(streaming = false) }
+                    st.copy(messages = list, streaming = false, error = error)
+                }
+
+                // bump conversation title + updatedAt
+                withContext(Dispatchers.IO) {
+                    val conv = Db.conversations.getById(convId) ?: return@withContext
+                    val newConv = conv.copy(
+                        updatedAt = System.currentTimeMillis(),
+                        title = if (conv.title == "New chat") text.take(40) else conv.title
+                    )
+                    Db.conversations.update(newConv)
                 }
             }
-        }
-    }
-
-    /** Replace the streaming placeholder with the persisted assistant message. */
-    private fun finalizeAssistant(convId: Long, finalText: String, persistedId: Long) {
-        _state.update { st ->
-            val list = st.messages.toMutableList()
-            val lastIdx = list.indexOfLast { it.isStreaming }
-            if (lastIdx >= 0 && finalText.isNotEmpty()) {
-                list[lastIdx] = UiMessage(persistedId, "assistant", finalText)
-            } else if (lastIdx >= 0) {
-                list.removeAt(lastIdx) // empty stream, drop placeholder
-            }
-            // bump conversation title + updatedAt
-            val firstUser = list.firstOrNull { it.role == "user" }?.content
-            st.copy(messages = list).also {
-                // side effect below
-            }
-            // schedule title bump
-            launchTitleBump(convId, firstUser)
-            st.copy(messages = list)
-        }
-    }
-
-    private fun launchTitleBump(convId: Long, firstUser: String?) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val conv = Db.conversations.getById(convId) ?: return@launch
-            val newConv = conv.copy(
-                updatedAt = System.currentTimeMillis(),
-                title = if (conv.title == "New chat" && firstUser != null) firstUser.take(40) else conv.title
-            )
-            Db.conversations.update(newConv)
         }
     }
 }
