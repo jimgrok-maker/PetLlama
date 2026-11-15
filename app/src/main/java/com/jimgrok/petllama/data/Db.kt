@@ -2,7 +2,6 @@ package com.jimgrok.petllama.data
 
 import android.content.Context
 import androidx.room.Room
-import com.jimgrok.petllama.data.Dao.Companion.
 
 object Db {
     private lateinit var db: PetLlamaDatabase
