@@ -5,7 +5,9 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
@@ -58,12 +60,12 @@ class McpClient(
     private var serverName: String? = null
     private var protocolVersion: String? = null
 
-    suspend fun describe(): McpServerInfo {
+    suspend fun describe(): McpServerInfo = withContext(Dispatchers.IO) {
         val tools = listTools()
-        return McpServerInfo(serverName, protocolVersion, tools.size)
+        McpServerInfo(serverName, protocolVersion, tools.size)
     }
 
-    suspend fun listTools(): List<McpTool> {
+    suspend fun listTools(): List<McpTool> = withContext(Dispatchers.IO) {
         ensureReady()
         val all = mutableListOf<McpTool>()
         var cursor: String? = null
@@ -82,10 +84,10 @@ class McpClient(
             cursor = result.get("nextCursor")?.takeIf { !it.isJsonNull }?.asString
             pages++
         } while (!cursor.isNullOrEmpty() && pages < MAX_PAGES)
-        return all
+        all
     }
 
-    suspend fun callTool(name: String, argumentsJson: String): McpCallResult {
+    suspend fun callTool(name: String, argumentsJson: String): McpCallResult = withContext(Dispatchers.IO) {
         ensureReady()
         val arguments = parseArguments(argumentsJson)
         val params = JsonObject().apply {
@@ -96,7 +98,7 @@ class McpClient(
             ?: throw McpException("tools/call returned nothing")
         val text = result.getAsJsonArray("content").toText()
         val isError = result.get("isError")?.takeIf { !it.isJsonNull }?.asBoolean == true
-        return McpCallResult(text.ifBlank { if (isError) "Tool failed" else "" }, isError)
+        McpCallResult(text.ifBlank { if (isError) "Tool failed" else "" }, isError)
     }
 
     private suspend fun ensureReady() {
@@ -122,10 +124,11 @@ class McpClient(
         openServerStream()
     }
 
-    /** Stops the optional server-to-client event stream. */
+    /** Stops the optional server-to-client event stream. Never touches the socket on the caller thread. */
     fun close() {
-        streamCall?.cancel()
+        val call = streamCall
         streamCall = null
+        if (call != null) cancelAwayFromCaller(call)
     }
 
     private suspend fun rpc(method: String, params: JsonElement?, notification: Boolean = false): JsonObject? {
@@ -203,15 +206,15 @@ class McpClient(
         val response = try {
             withTimeoutOrNull(2_000) { execute(call) }
         } catch (_: Exception) {
-            call.cancel()
+            cancelAwayFromCaller(call)
             return
         }
         if (response == null) {
-            call.cancel()
+            cancelAwayFromCaller(call)
             return
         }
         if (response.code == 404 || response.code == 405) {
-            response.close()
+            closeAwayFromCaller(response)
             return
         }
         Thread {
@@ -261,14 +264,15 @@ class McpClient(
     private suspend fun execute(request: Request): Response = execute(http.newCall(request))
 
     private suspend fun execute(call: Call): Response = suspendCancellableCoroutine { cont ->
-        cont.invokeOnCancellation { call.cancel() }
+        // Cancellation can arrive from the main thread. Closing the socket there throws.
+        cont.invokeOnCancellation { cancelAwayFromCaller(call) }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (cont.isActive) cont.resumeWithException(McpException("Unreachable: ${e.explain()}"))
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (cont.isActive) cont.resume(response) else response.close()
+                if (cont.isActive) cont.resume(response) else closeAwayFromCaller(response)
             }
         })
     }
@@ -278,6 +282,32 @@ class McpClient(
         const val USER_AGENT = "PetLlama/1.0"
         private const val MAX_PAGES = 20
         private val JSON = "application/json".toMediaType()
+        private fun cancelAwayFromCaller(call: Call) {
+            Thread {
+                try {
+                    call.cancel()
+                } catch (_: Exception) {
+                }
+            }.apply {
+                isDaemon = true
+                name = "petllama-mcp-cancel"
+                start()
+            }
+        }
+
+        private fun closeAwayFromCaller(response: Response) {
+            Thread {
+                try {
+                    response.close()
+                } catch (_: Exception) {
+                }
+            }.apply {
+                isDaemon = true
+                name = "petllama-mcp-close"
+                start()
+            }
+        }
+
         private val defaultHttp: OkHttpClient by lazy {
             OkHttpClient.Builder()
                 .connectTimeout(8, TimeUnit.SECONDS)

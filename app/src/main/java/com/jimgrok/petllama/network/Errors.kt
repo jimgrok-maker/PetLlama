@@ -7,7 +7,7 @@ fun Throwable.explain(): String {
     val seen = HashSet<Throwable>()
     while (current != null && seen.add(current) && parts.size < 4) {
         val message = current.message?.takeIf { it.isNotBlank() } ?: "(no message)"
-        parts += "${current.javaClass.simpleName}: $message"
+        parts += "${current.javaClass.name}: $message"
         current = current.cause
     }
     return parts.joinToString(" | ")
