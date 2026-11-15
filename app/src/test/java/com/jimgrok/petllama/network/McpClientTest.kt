@@ -172,6 +172,112 @@ class McpClientTest {
     }
 
     @Test
+    fun searxngStyleHandshakeSkipsLoggingEventsAndDoesNotLookLikeOkHttp() = runBlocking {
+        val seen = mutableListOf<String>()
+        val userAgents = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val ua = request.getHeader("User-Agent").orEmpty()
+                userAgents += ua
+                if (ua.contains("okhttp", ignoreCase = true)) {
+                    return MockResponse().setResponseCode(429).setBody("bot detected, HTTP header User-Agent: $ua")
+                }
+                if (request.method == "GET") {
+                    seen += "GET"
+                    return MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(": connected\n\n")
+                }
+                val json = JsonParser.parseString(request.body.readUtf8()).asJsonObject
+                val method = json.get("method").asString
+                seen += method
+                val id = if (json.has("id")) json.get("id").asInt else 0
+                return when (method) {
+                    "initialize" -> MockResponse()
+                        .setHeader("Content-Type", "application/json")
+                        .setHeader("mcp-session-id", "sess-searx")
+                        .setBody(
+                            """{"jsonrpc":"2.0","id":$id,"result":{"protocolVersion":"2025-06-18","capabilities":{"logging":{},"tools":{}},"serverInfo":{"name":"Searxng","version":"4.2.0"}}}"""
+                        )
+                    "notifications/initialized" -> {
+                        if (request.getHeader("Mcp-Session-Id") != "sess-searx") {
+                            MockResponse().setResponseCode(400).setBody("missing session")
+                        } else {
+                            MockResponse().setResponseCode(202).setBody("")
+                        }
+                    }
+                    "tools/list" -> {
+                        if (request.getHeader("Mcp-Session-Id") != "sess-searx") {
+                            return MockResponse().setResponseCode(400).setBody("missing session")
+                        }
+                        val sse = "event: message\n" +
+                            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"listing tools\"}}\n\n" +
+                            "event: message\n" +
+                            "data: {\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"searxng_search\",\"description\":\"Search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]}}\n\n" +
+                            "event: message\n" +
+                            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"debug\",\"data\":\"still logging\"}}\n\n"
+                        MockResponse()
+                            .setHeader("Content-Type", "text/event-stream")
+                            .setBody(sse)
+                    }
+                    else -> MockResponse().setResponseCode(404).setBody("no $method")
+                }
+            }
+        }
+        server.start()
+        val client = McpClient(
+            McpServerEntity(
+                id = 4,
+                name = "searxng",
+                url = server.url("/mcp").toString().trimEnd('/'),
+                bearerToken = "",
+                headersJson = "[]"
+            )
+        )
+        try {
+            val info = client.describe()
+            assertEquals("Searxng", info.serverName)
+            assertEquals("2025-06-18", info.protocolVersion)
+            assertEquals(1, info.toolCount)
+            assertEquals("searxng_search", client.listTools().single().name)
+            assertTrue(userAgents.all { it.contains("PetLlama") && !it.contains("okhttp") })
+            assertTrue(seen.indexOf("GET") < seen.indexOf("tools/list"))
+        } finally {
+            client.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun httpFailureShowsStatusAndBodyInsteadOfBareFailed() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(429).setBody("bot detected"))
+        server.start()
+        try {
+            val error = runCatching {
+                McpClient(
+                    McpServerEntity(name = "searxng", url = server.url("/mcp").toString().trimEnd('/'))
+                ).describe()
+            }.exceptionOrNull()
+            val text = error!!.toUserMessage()
+            assertTrue(text.contains("429"))
+            assertTrue(text.contains("bot detected"))
+            assertFalse(text == "failed" || text.endsWith("failed"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun missingExceptionMessageIsStillDescribed() {
+        val text = Exception().toUserMessage()
+        assertTrue(text.contains("Exception"))
+        assertTrue(text.contains("no message"))
+        assertFalse(text == "failed")
+    }
+
+    @Test
     fun headerLinesAndSseParser() {
         val headers = parseHeaderLines("X-Api-Key: abc\n\nAccept: text/plain\n")
         assertEquals(listOf(McpHeader("X-Api-Key", "abc"), McpHeader("Accept", "text/plain")), headers)
