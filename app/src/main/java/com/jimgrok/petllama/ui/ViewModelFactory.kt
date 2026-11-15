@@ -1,34 +1,29 @@
 package com.jimgrok.petllama.ui
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.jimgrok.petllama.ui.chat.ChatViewModel
 
 /**
  * Minimal factory so screens can create a ViewModel without Hilt/DI.
- * ChatViewModel needs a serverId, so it's created via remember(serverId) instead.
+ * The Compose viewModel() call keeps the instance across rotation.
  */
 val serversViewModelFactory: ViewModelProvider.Factory = object : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
-    private var instance: ServersViewModel? = null
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(ServersViewModel::class.java)) {
-            @Suppress("UNCHECKED_CAST")
-            return (instance ?: ServersViewModel().also { instance = it }) as T
+            return ServersViewModel() as T
         }
         throw IllegalArgumentException("Unknown ViewModel: ${modelClass.name}")
     }
 }
 
 /**
- * Create a ChatViewModel scoped to a serverId and remember it for the composition.
+ * Chat screen ViewModel, kept by the activity and separated per server.
  */
 @Composable
-fun rememberChatViewModel(serverId: Long): ChatViewModelHolder {
-    val vm = remember(serverId) { ChatViewModel() }
-    return ChatViewModelHolder(vm, serverId)
+fun rememberChatViewModel(serverId: Long): ChatViewModel {
+    return viewModel(key = "chat-$serverId") { ChatViewModel() }
 }
-
-class ChatViewModelHolder(val vm: ChatViewModel, val serverId: Long)

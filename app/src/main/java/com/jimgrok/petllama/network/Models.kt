@@ -10,15 +10,15 @@ data class ModelInfo(
 )
 
 data class ModelListResponse(
-    @SerializedName("data") val data: List<ModelInfo> = emptyList()
+    @SerializedName("data") val data: List<ModelInfo>? = emptyList()
 )
 
 /** One SSE chunk from /v1/chat/completions */
 data class ChatChunk(
-    @SerializedName("choices") val choices: List<Choice> = emptyList()
+    @SerializedName("choices") val choices: List<Choice>? = emptyList()
 ) {
     data class Choice(
-        @SerializedName("delta") val delta: Delta = Delta(),
+        @SerializedName("delta") val delta: Delta? = null,
         @SerializedName("finish_reason") val finishReason: String? = null
     )
     data class Delta(

@@ -1,5 +1,7 @@
 package com.jimgrok.petllama.ui.chat
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,15 +10,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.BottomAppBar
@@ -42,7 +47,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jimgrok.petllama.ui.rememberChatViewModel
@@ -55,8 +59,7 @@ fun ChatScreen(
     serverId: Long,
     onBack: () -> Unit
 ) {
-    val holder = rememberChatViewModel(serverId)
-    val vm = holder.vm
+    val vm = rememberChatViewModel(serverId)
     val state by vm.state.collectAsState()
 
     LaunchedEffect(serverId) { vm.init(serverId) }
@@ -121,7 +124,7 @@ fun ChatScreen(
                             vm.send(input)
                             input = ""
                         }, enabled = input.isNotBlank()) {
-                            Icon(Icons.Default.Send, contentDescription = "Send")
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                         }
                     }
                 }
@@ -167,7 +170,7 @@ fun ChatScreen(
                     Spacer(Modifier.weight(1f))
                     Text(
                         if (state.models.isEmpty()) "Connect to a server to start chatting."
-                        else "\ud83e� Start a conversation.",
+                        else "\uD83E\uDD99 Start a conversation.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.weight(1f))
@@ -220,24 +223,19 @@ fun ChatScreen(
 fun MessageBubble(role: String, content: String, isStreaming: Boolean) {
     val isUser = role == "user"
     val bg = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
     Row(modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Column(
             modifier = Modifier
-                .padding(horizontal = 8.dp)
-                .padding(vertical = 6.dp)
-                .weight(1f, fill = false),
+                .padding(vertical = 2.dp)
+                .weight(1f, fill = false)
+                .background(bg, RoundedCornerShape(16.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
             if (content.isNotEmpty()) {
-                Text(
-                    content,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(vertical = 8.dp)
-                )
+                Text(content, style = MaterialTheme.typography.bodyLarge, color = fg)
             } else if (isStreaming) {
                 Text("\u2026", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -310,15 +308,35 @@ fun HistorySheet(
                 Text("New chat")
             }
             Spacer(Modifier.height(8.dp))
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(conversations, key = { it.id }) { conv ->
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(conv.title, modifier = Modifier.weight(1f),
-                            maxLines = 1, style = if (conv.id == activeId) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyLarge)
+            if (conversations.isEmpty()) {
+                Text(
+                    "No saved chats yet.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                conversations.forEach { conv ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpen(conv.id) }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            conv.title,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            style = if (conv.id == activeId) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyLarge
+                        )
                         TextButton(onClick = { onDelete(conv.id) }) { Text("\u2715") }
                     }
-                    // tap to open
                 }
             }
         }
