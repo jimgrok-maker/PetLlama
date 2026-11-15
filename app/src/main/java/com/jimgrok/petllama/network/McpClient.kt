@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -13,6 +14,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.BufferedSource
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -52,6 +54,7 @@ class McpClient(
     private var sessionId: String? = null
     private var ready = false
     private var nextId = 1
+    private var streamCall: Call? = null
     private var serverName: String? = null
     private var protocolVersion: String? = null
 
@@ -112,8 +115,17 @@ class McpClient(
         serverName = result.getAsJsonObject("serverInfo")
             ?.get("name")?.takeIf { !it.isJsonNull }?.asString
         ready = true
-        // Notification: the server may answer 202 with an empty body.
+        // Notification: the server may answer 202 or 204 with an empty body.
         rpc("notifications/initialized", JsonObject(), notification = true)
+        // The llama.cpp web UI then opens GET so the server can push logs.
+        // Some servers want that stream up before tools/list.
+        openServerStream()
+    }
+
+    /** Stops the optional server-to-client event stream. */
+    fun close() {
+        streamCall?.cancel()
+        streamCall = null
     }
 
     private suspend fun rpc(method: String, params: JsonElement?, notification: Boolean = false): JsonObject? {
@@ -126,14 +138,108 @@ class McpClient(
         }
         val url = server.url.trim()
         if (url.isEmpty()) throw McpException("Server URL is empty")
+        val builder = requestBuilder(url)
+            .post(body.toString().toRequestBody(JSON))
+        val response = try {
+            execute(builder.build())
+        } catch (e: McpException) {
+            throw e
+        } catch (e: Exception) {
+            throw McpException("${server.name} $method failed: ${e.explain()}")
+        }
+        response.use { resp ->
+            rememberSession(resp)
+            if (resp.code == 202 || resp.code == 204) return null
+            if (!resp.isSuccessful) {
+                val snippet = runCatching { resp.body?.string().orEmpty() }.getOrDefault("").take(300)
+                throw McpException(
+                    "HTTP ${resp.code} from ${server.name} on $method" +
+                        if (snippet.isBlank()) "" else ": $snippet"
+                )
+            }
+            val messages = try {
+                readMessages(resp, id)
+            } catch (e: McpException) {
+                throw e
+            } catch (e: Exception) {
+                throw McpException("Could not read $method from ${server.name}: ${e.explain()}")
+            }
+            if (id == null) {
+                messages.firstNotNullOfOrNull { jsonRpcError(it) }?.let { error ->
+                    throw McpException(error)
+                }
+                return null
+            }
+            val match = messages.firstOrNull { it.matchesId(id) }
+                ?: throw McpException(
+                    "$method from ${server.name} returned no JSON-RPC result " +
+                        "(HTTP ${resp.code}, ${messages.size} other message(s))"
+                )
+            jsonRpcError(match)?.let { throw McpException(it) }
+            val result = match.asJsonObject.get("result")
+            if (result == null || result.isJsonNull) return null
+            if (!result.isJsonObject) {
+                throw McpException("$method result from ${server.name} was not a JSON object")
+            }
+            return result.asJsonObject
+        }
+    }
+
+    /**
+     * Opens the optional GET event stream the llama.cpp web UI opens after initialize.
+     * Failure is ignored: a server may answer 405 when it does not push messages.
+     */
+    private suspend fun openServerStream() {
+        if (streamCall != null) return
+        val call = try {
+            http.newCall(
+                requestBuilder(server.url.trim()).get().header("Accept", "text/event-stream").build()
+            )
+        } catch (_: Exception) {
+            return
+        }
+        streamCall = call
+        // Headers should come back quickly. A server that ignores GET must not block tools/list.
+        val response = try {
+            withTimeoutOrNull(2_000) { execute(call) }
+        } catch (_: Exception) {
+            call.cancel()
+            return
+        }
+        if (response == null) {
+            call.cancel()
+            return
+        }
+        if (response.code == 404 || response.code == 405) {
+            response.close()
+            return
+        }
+        Thread {
+            try {
+                val source = response.body?.source()
+                while (source != null && !source.exhausted()) {
+                    if (source.readUtf8Line() == null) break
+                }
+            } catch (_: Exception) {
+            } finally {
+                response.close()
+            }
+        }.apply {
+            isDaemon = true
+            name = "petllama-mcp-events"
+            start()
+        }
+    }
+
+    private fun requestBuilder(url: String): Request.Builder {
         val builder = try {
             Request.Builder().url(url)
         } catch (e: IllegalArgumentException) {
-            throw McpException("Bad URL: ${e.message}")
+            throw McpException("Bad URL: ${e.message ?: url}")
         }
-            .post(body.toString().toRequestBody(JSON))
-            .header("Accept", "application/json, text/event-stream")
-            .header("Content-Type", "application/json")
+        // SearXNG treats the default OkHttp user agent as a bot and refuses the connection.
+        builder.header("User-Agent", USER_AGENT)
+        builder.header("Accept", "application/json, text/event-stream")
         if (server.bearerToken.isNotBlank()) {
             builder.header("Authorization", "Bearer ${server.bearerToken.trim()}")
         }
@@ -144,50 +250,21 @@ class McpClient(
             builder.header(header.name, header.value)
         }
         sessionId?.let { builder.header("Mcp-Session-Id", it) }
-        if (ready) builder.header("MCP-Protocol-Version", PROTOCOL)
-
-        val response = execute(builder.build())
-        response.use { resp ->
-            resp.header("Mcp-Session-Id")?.takeIf { it.isNotBlank() }?.let { sessionId = it }
-            if (resp.code == 202 || resp.code == 204) return null
-            if (!resp.isSuccessful) {
-                val snippet = resp.body?.string().orEmpty().take(200)
-                throw McpException("HTTP ${resp.code} from ${server.name}${if (snippet.isBlank()) "" else ": $snippet"}")
-            }
-            val raw = resp.body?.string().orEmpty()
-            if (raw.isBlank()) return null
-            val contentType = resp.header("Content-Type").orEmpty()
-            val payloads = if (contentType.contains("text/event-stream", ignoreCase = true) || looksLikeSse(raw)) {
-                parseSsePayloads(raw)
-            } else {
-                listOf(raw.trim())
-            }
-            val messages = payloads.mapNotNull { payload ->
-                runCatching { JsonParser.parseString(payload) }.getOrNull()
-            }
-            if (id == null) {
-                val error = messages.firstNotNullOfOrNull { it.asObjectOrNull()?.getAsJsonObject("error") }
-                if (error != null) throw McpException(error.get("message")?.asString ?: "MCP error")
-                return null
-            }
-            val match = messages.firstNotNullOfOrNull { element ->
-                val obj = element.asObjectOrNull() ?: return@firstNotNullOfOrNull null
-                val messageId = obj.get("id")?.takeIf { !it.isJsonNull }?.rpcId()
-                if (messageId == id.toString()) obj else null
-            } ?: throw McpException("$method returned no JSON-RPC result")
-            match.getAsJsonObject("error")?.let { error ->
-                throw McpException(error.get("message")?.asString ?: "MCP error")
-            }
-            return match.getAsJsonObject("result")
-        }
+        if (ready) builder.header("MCP-Protocol-Version", protocolVersion ?: PROTOCOL)
+        return builder
     }
 
-    private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { cont ->
-        val call = http.newCall(request)
+    private fun rememberSession(resp: Response) {
+        resp.header("Mcp-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let { sessionId = it }
+    }
+
+    private suspend fun execute(request: Request): Response = execute(http.newCall(request))
+
+    private suspend fun execute(call: Call): Response = suspendCancellableCoroutine { cont ->
         cont.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (cont.isActive) cont.resumeWithException(McpException("Unreachable: ${e.message}"))
+                if (cont.isActive) cont.resumeWithException(McpException("Unreachable: ${e.explain()}"))
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -198,8 +275,9 @@ class McpClient(
 
     companion object {
         const val PROTOCOL = "2025-06-18"
+        const val USER_AGENT = "PetLlama/1.0"
         private const val MAX_PAGES = 20
-        private val JSON = "application/json; charset=utf-8".toMediaType()
+        private val JSON = "application/json".toMediaType()
         private val defaultHttp: OkHttpClient by lazy {
             OkHttpClient.Builder()
                 .connectTimeout(8, TimeUnit.SECONDS)
@@ -207,6 +285,76 @@ class McpClient(
                 .build()
         }
     }
+}
+
+private fun readMessages(resp: Response, expectId: Int?): List<JsonElement> {
+    val body = resp.body ?: return emptyList()
+    val type = resp.header("Content-Type").orEmpty()
+    val source = body.source()
+    if (type.contains("text/event-stream", ignoreCase = true)) {
+        return readSse(source, expectId)
+    }
+    val raw = source.readUtf8()
+    if (raw.isBlank()) return emptyList()
+    return if (looksLikeSse(raw)) {
+        parseSsePayloads(raw).mapNotNull { parseJson(it) }
+    } else {
+        listOfNotNull(parseJson(raw))
+    }
+}
+
+private fun readSse(source: BufferedSource, expectId: Int?): List<JsonElement> {
+    val found = mutableListOf<JsonElement>()
+    val data = StringBuilder()
+    fun flush() {
+        if (data.isEmpty()) return
+        val payload = data.toString().trim()
+        data.clear()
+        if (payload.isEmpty() || payload == "[DONE]") return
+        parseJson(payload)?.let { found += it }
+    }
+    try {
+        while (!source.exhausted()) {
+            val line = source.readUtf8Line() ?: break
+            val trimmed = line.trimEnd('\r')
+            when {
+                trimmed.isEmpty() -> {
+                    flush()
+                    // Stop once the answer for this request arrives. A server may
+                    // keep the stream open, or send logging notifications first.
+                    if (expectId != null && found.any { it.matchesId(expectId) }) return found
+                }
+                trimmed.startsWith(":") -> Unit
+                trimmed.startsWith("data:") -> {
+                    if (data.isNotEmpty()) data.append('\n')
+                    data.append(trimmed.removePrefix("data:").trim())
+                }
+            }
+        }
+        flush()
+    } catch (e: Exception) {
+        flush()
+        if (expectId != null && found.any { it.matchesId(expectId) }) return found
+        throw e
+    }
+    return found
+}
+
+private fun parseJson(payload: String): JsonElement? =
+    runCatching { JsonParser.parseString(payload) }.getOrNull()
+
+private fun jsonRpcError(element: JsonElement): String? {
+    val obj = element.asObjectOrNull() ?: return null
+    val error = obj.get("error") ?: return null
+    if (error.isJsonNull) return "MCP error"
+    if (!error.isJsonObject) return error.toString()
+    return error.asJsonObject.get("message")?.takeIf { !it.isJsonNull }?.asString ?: "MCP error"
+}
+
+private fun JsonElement.matchesId(id: Int): Boolean {
+    val obj = asObjectOrNull() ?: return false
+    val messageId = obj.get("id")?.takeIf { !it.isJsonNull }?.rpcId() ?: return false
+    return messageId == id.toString()
 }
 
 internal fun parseSsePayloads(body: String): List<String> {

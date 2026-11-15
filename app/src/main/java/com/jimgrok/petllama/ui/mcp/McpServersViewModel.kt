@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.data.McpServerEntity
 import com.jimgrok.petllama.network.McpClient
+import com.jimgrok.petllama.network.toUserMessage
 import com.jimgrok.petllama.network.headersToJson
 import com.jimgrok.petllama.network.parseHeaderLines
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,12 +74,15 @@ class McpServersViewModel : ViewModel() {
     fun test(server: McpServerEntity) {
         _state.update { it.copy(testingId = server.id, testResult = null) }
         viewModelScope.launch {
+            val client = McpClient(server)
             val msg = try {
-                val info = McpClient(server).describe()
+                val info = client.describe()
                 val from = info.serverName?.let { " from $it" }.orEmpty()
                 "\u2705 ${info.toolCount} tool(s)$from"
             } catch (e: Exception) {
-                "\u274c ${e.message ?: "failed"}"
+                "\u274c ${e.toUserMessage()}"
+            } finally {
+                runCatching { client.close() }
             }
             _state.update { it.copy(testingId = null, testResult = server.id to msg) }
         }

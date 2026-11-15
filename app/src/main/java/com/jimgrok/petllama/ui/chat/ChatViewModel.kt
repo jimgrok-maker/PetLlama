@@ -6,10 +6,12 @@ import com.jimgrok.petllama.data.ConversationEntity
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.data.MessageEntity
 import com.jimgrok.petllama.data.ServerEntity
+import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.ExposedTool
 import com.jimgrok.petllama.network.LlamaClient
 import com.jimgrok.petllama.network.McpClient
+import com.jimgrok.petllama.network.toUserMessage
 import com.jimgrok.petllama.network.ModelInfo
 import com.jimgrok.petllama.network.Msg
 import com.jimgrok.petllama.network.ToolCatalog
@@ -230,6 +232,7 @@ class ChatViewModel : ViewModel() {
             streamJob = launch {
                 var error: String? = null
                 try {
+                    GenerationGuard.start()
                     val catalog = if (s.toolsEnabled) loadCatalog() else null
                     runToolLoop(
                         llama = client,
@@ -298,8 +301,10 @@ class ChatViewModel : ViewModel() {
                 } catch (e: CancellationException) {
                     // stop pressed — keep partial text and finished tool bubbles
                 } catch (e: Exception) {
-                    error = e.message ?: "stream error"
+                    error = e.toUserMessage()
                 } finally {
+                    sessions.values.forEach { runCatching { it.close() } }
+                    GenerationGuard.stop()
                     withContext(NonCancellable) {
                         finishAssistantBubble(convId)
                         _state.update { st ->

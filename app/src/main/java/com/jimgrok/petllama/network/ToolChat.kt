@@ -69,7 +69,7 @@ data class ToolTrace(
 
 data class LoopResult(val hitToolLimit: Boolean)
 
-private const val MAX_TOOL_RESULT_CHARS = 12_000
+private const val MAX_TOOL_RESULT_CHARS = 4_000
 
 /**
  * Talks to llama-server, and when the model asks for a tool, runs it on the
@@ -94,18 +94,39 @@ suspend fun runToolLoop(
         val tools = if (allowTools) catalog?.toOpenAiTools() else null
         val roundText = StringBuilder()
         val partials = sortedMapOf<Int, PartialCall>()
-        llama.streamChat(buildRequest(messages, tools)).collect { event ->
-            when (event) {
-                is StreamEvent.Content -> {
-                    roundText.append(event.text)
-                    onContent(event.text)
+        var attempt = 0
+        while (true) {
+            roundText.clear()
+            partials.clear()
+            var events = 0
+            try {
+                llama.streamChat(buildRequest(messages, tools)).collect { event ->
+                    events++
+                    when (event) {
+                        is StreamEvent.Content -> {
+                            roundText.append(event.text)
+                            onContent(event.text)
+                        }
+                        is StreamEvent.ToolDelta -> {
+                            val partial = partials.getOrPut(event.index) { PartialCall() }
+                            if (!event.id.isNullOrEmpty()) partial.id = event.id
+                            if (!event.name.isNullOrEmpty()) partial.name = event.name
+                            if (event.arguments != null) partial.arguments.append(event.arguments)
+                        }
+                    }
                 }
-                is StreamEvent.ToolDelta -> {
-                    val partial = partials.getOrPut(event.index) { PartialCall() }
-                    if (!event.id.isNullOrEmpty()) partial.id = event.id
-                    if (!event.name.isNullOrEmpty()) partial.name = event.name
-                    if (event.arguments != null) partial.arguments.append(event.arguments)
+                break
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // One retry when the socket dies before any token. A dropped
+                // connection after text has started is left as-is so we don't
+                // print the same words twice.
+                if (attempt == 0 && events == 0 && isTransientNetworkError(e)) {
+                    attempt++
+                    continue
                 }
+                throw e
             }
         }
         val calls = partials.values.filter { it.name.isNotBlank() }
@@ -138,10 +159,10 @@ suspend fun runToolLoop(
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    McpCallResult("Tool error: ${e.message ?: "failed"}", isError = true)
+                    McpCallResult("Tool error: ${e.explain()}", isError = true)
                 }
             }
-            val text = capResult(outcome.text)
+            val text = capToolResult(outcome.text)
             onToolResult(
                 ToolTrace(
                     serverName = labelServer,
@@ -163,6 +184,9 @@ private class PartialCall {
     val arguments: StringBuilder = StringBuilder()
 }
 
-private fun capResult(text: String): String =
-    if (text.length <= MAX_TOOL_RESULT_CHARS) text
-    else text.take(MAX_TOOL_RESULT_CHARS) + "\n…(truncated)"
+internal fun capToolResult(text: String): String {
+    if (text.length <= MAX_TOOL_RESULT_CHARS) return text
+    val omitted = text.length - MAX_TOOL_RESULT_CHARS
+    return text.take(MAX_TOOL_RESULT_CHARS) +
+        "\n…(truncated, $omitted more characters left out so the model can finish)"
+}

@@ -112,8 +112,12 @@ class LlamaClient(private val server: ServerEntity) {
             .post(body)
             .build()
         // No read timeout: a local model can pause between tokens for longer than a normal HTTP read.
+        // No read, write, or whole-call timeout. A local model can sit silent for a
+        // long time while it reads a big tool result before the first token.
         val call = client.newBuilder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .writeTimeout(0, TimeUnit.MILLISECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
             .build()
             .newCall(req)
 

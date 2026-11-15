@@ -57,7 +57,9 @@ llama-server -m your-model.gguf --host 0.0.0.0 --port 8080 --jinja
 
 A GitHub MCP server often has a few dozen tools and wants a bearer token. SearXNG is usually one search tool and no token. You type the URLs yourself; the app does not guess them.
 
-If a server is down, or a tool returns an error, that text is given back to the model so it can still answer. The chat does not crash.
+If a server is down, or a tool returns an error, that text is given back to the model so it can still answer. The chat does not crash. Test shows the real error (HTTP status and message), not a bare "failed".
+
+A long reply keeps a small notification up ("Waiting for the model to finish"). Allow notifications if Android asks. That stops the phone from cutting the connection when you switch apps for a moment. Very large tool results are shortened before they are sent back, so a big GitHub reply does not stall the model.
 
 Lots of tools use a lot of the model's context. Turn off servers you are not using.
 

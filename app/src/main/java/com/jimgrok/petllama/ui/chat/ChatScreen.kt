@@ -173,7 +173,7 @@ fun ChatScreen(
             // error banner
             state.error?.let { err ->
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Text(err, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    Text(err, color = MaterialTheme.colorScheme.error, fontSize = 13.sp, maxLines = 6)
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = { vm.clearError() }) { Text("dismiss") }
                 }

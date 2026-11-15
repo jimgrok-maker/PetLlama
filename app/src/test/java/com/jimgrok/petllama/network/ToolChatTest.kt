@@ -8,6 +8,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -240,6 +241,50 @@ class ToolChatTest {
             llama.shutdown()
             mcp.shutdown()
         }
+    }
+
+    @Test
+    fun connectionDropBeforeAnyTokenIsTriedOnceMore() = runBlocking {
+        val llama = MockWebServer()
+        var calls = 0
+        llama.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                calls++
+                if (calls == 1) {
+                    return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                }
+                return MockResponse().setBody(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"still here\"}}]}\n\ndata: [DONE]\n\n"
+                )
+            }
+        }
+        llama.start()
+        try {
+            val text = StringBuilder()
+            runToolLoop(
+                llama = LlamaClient(ServerEntity(name = "llama", url = llama.url("/").toString().trimEnd('/'))),
+                messages = mutableListOf(Msg("user", "hi")),
+                buildRequest = { msgs, tools -> ChatRequest(model = "m", messages = msgs, tools = tools) },
+                catalog = null,
+                callTool = { _, _ -> error("no tool") },
+                onContent = { text.append(it) },
+                onRoundDone = {},
+                onToolStart = { _, _, _ -> },
+                onToolResult = {}
+            )
+            assertEquals("still here", text.toString())
+            assertEquals(2, calls)
+        } finally {
+            llama.shutdown()
+        }
+    }
+
+    @Test
+    fun hugeToolResultIsCutDownBeforeItIsSent() {
+        val text = capToolResult("x".repeat(5_000))
+        assertTrue(text.contains("truncated"))
+        assertTrue(text.contains("1000 more characters"))
+        assertTrue(text.length < 5_000)
     }
 
     @Test
