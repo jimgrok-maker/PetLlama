@@ -10,7 +10,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.ui.chat.ChatScreen
 import com.jimgrok.petllama.ui.screens.ServersScreen
@@ -26,7 +25,6 @@ import kotlinx.coroutines.flow.first
 fun RootScreen() {
     MaterialTheme(colorScheme = darkColorScheme()) {
         var selectedServerId by remember { mutableStateOf<Long?>(null) }
-        val context = LocalContext.current
 
         LaunchedEffect(Unit) {
             val first = Db.servers.observeAll().first().firstOrNull()

@@ -20,7 +20,7 @@ interface ServerDao {
 
 @Dao
 interface ConversationDao {
-    @Query("SELECT * FROM conversations ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM conversations WHERE serverId = :serverId ORDER BY updatedAt DESC")
     fun observeAll(serverId: Long): Flow<List<ConversationEntity>>
 
     @Query("SELECT * FROM conversations WHERE id = :id")
@@ -37,6 +37,16 @@ interface ConversationDao {
 
     @Delete
     suspend fun delete(conversation: ConversationEntity)
+
+    @Query("DELETE FROM messages WHERE conversationId = :conversationId")
+    suspend fun deleteMessagesFor(conversationId: Long)
+
+    /** Removes the conversation and the messages that belong to it. */
+    @Transaction
+    suspend fun deleteConversation(conversation: ConversationEntity) {
+        deleteMessagesFor(conversation.id)
+        delete(conversation)
+    }
 
     @Query("SELECT * FROM messages WHERE conversationId = :cid ORDER BY createdAt ASC")
     suspend fun messagesFor(cid: Long): List<MessageEntity>

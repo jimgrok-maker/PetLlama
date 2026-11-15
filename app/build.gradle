@@ -1,6 +1,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'com.google.devtools.ksp'
 }
 
 android {
@@ -18,7 +19,8 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            // CI provides the debug keystore for signing; see .github/workflows/android.yml
+            // Debug builds are what CI publishes. They are signed with the
+            // debug keystore Android Gradle Plugin creates automatically.
             signingConfig signingConfigs.debug
         }
     }
@@ -35,6 +37,9 @@ android {
     }
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.14'
+    }
+    testOptions {
+        unitTests.returnDefaultValues = true
     }
 }
 
@@ -62,6 +67,7 @@ dependencies {
     // Local storage
     implementation 'androidx.room:room-runtime:2.6.1'
     implementation 'androidx.room:room-ktx:2.6.1'
+    ksp 'androidx.room:room-compiler:2.6.1'
     implementation 'androidx.datastore:datastore-preferences:1.1.1'
 
     // Markdown
@@ -69,4 +75,7 @@ dependencies {
     implementation 'io.noties.markwon:html:4.6.2'
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
 }

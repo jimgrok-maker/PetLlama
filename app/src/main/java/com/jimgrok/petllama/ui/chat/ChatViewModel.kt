@@ -48,9 +48,14 @@ class ChatViewModel : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
     private var streamJob: Job? = null
+    private var loadJob: Job? = null
 
     fun init(serverId: Long) {
-        viewModelScope.launch {
+        // The screen calls this again after rotation. The load job stays active
+        // for the life of the screen, so don't start a second collector.
+        if (loadJob?.isActive == true && _state.value.server?.id == serverId) return
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             val server = Db.servers.getById(serverId) ?: return@launch
             _state.update { it.copy(server = server) }
             try {
@@ -58,16 +63,17 @@ class ChatViewModel : ViewModel() {
                 _state.update { s ->
                     s.copy(
                         models = models,
-                        selectedModel = s.selectedModel.ifEmpty { models.firstOrNull()?.id ?: "" }
+                        selectedModel = s.selectedModel.ifEmpty { models.firstOrNull()?.id ?: "" },
+                        error = if (s.error?.startsWith("Failed to load models") == true) null else s.error
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Failed to load models: ${e.message}") }
             }
-            launch {
-                Db.conversations.observeAll(serverId).collect { convs ->
-                    _state.update { it.copy(conversations = convs) }
-                }
+            Db.conversations.observeAll(serverId).collect { convs ->
+                _state.update { it.copy(conversations = convs) }
             }
         }
     }
@@ -98,7 +104,7 @@ class ChatViewModel : ViewModel() {
     fun deleteConversation(id: Long) {
         viewModelScope.launch {
             val conv = Db.conversations.getById(id) ?: return@launch
-            Db.conversations.delete(conv)
+            Db.conversations.deleteConversation(conv)
             if (_state.value.activeConversationId == id) {
                 _state.update { it.copy(activeConversationId = null, messages = emptyList()) }
             }
@@ -114,8 +120,6 @@ class ChatViewModel : ViewModel() {
 
     fun stop() {
         streamJob?.cancel()
-        streamJob = null
-        _state.update { it.copy(streaming = false) }
     }
 
     private suspend fun persistAssistant(convId: Long, text: String): Long =
@@ -130,7 +134,11 @@ class ChatViewModel : ViewModel() {
         if (text.isBlank() || _state.value.streaming) return
         val s = _state.value
         val server = s.server ?: return
-        val model = s.selectedModel.ifEmpty { s.models.firstOrNull()?.id } ?: return
+        val model = s.selectedModel.ifEmpty { s.models.firstOrNull()?.id }
+        if (model == null) {
+            _state.update { it.copy(error = "No model loaded on this server.") }
+            return
+        }
 
         viewModelScope.launch {
             val convId = s.activeConversationId ?: withContext(Dispatchers.IO) {
@@ -147,15 +155,11 @@ class ChatViewModel : ViewModel() {
                 st.copy(messages = st.messages + UiMessage(mid, "user", text))
             }
 
-            val history = _state.value.messages.filter { it.id >= 0 }.takeLast(20)
-            val msgs = mutableListOf<Msg>()
-            if (s.systemPrompt.isNotBlank()) msgs += Msg("system", s.systemPrompt)
-            msgs += history.map { Msg(it.role, it.content) }
-            msgs += Msg("user", text)
-
+            // The user row was just appended above. Do not append `text` again
+            // or the model sees the last user message twice.
             val request = ChatRequest(
                 model = model,
-                messages = msgs,
+                messages = outgoingMessages(_state.value.messages, s.systemPrompt),
                 stream = true,
                 temperature = s.temperature,
                 topP = s.topP,
@@ -217,4 +221,19 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+}
+
+/**
+ * Messages to send to the model. [history] already includes the new user row.
+ * Streaming placeholders (negative ids) are left out. The user text is not added again.
+ */
+internal fun outgoingMessages(
+    history: List<UiMessage>,
+    systemPrompt: String,
+    limit: Int = 20
+): List<Msg> {
+    val msgs = ArrayList<Msg>(history.size + 1)
+    if (systemPrompt.isNotBlank()) msgs += Msg("system", systemPrompt)
+    history.filter { it.id >= 0 }.takeLast(limit).forEach { msgs += Msg(it.role, it.content) }
+    return msgs
 }
