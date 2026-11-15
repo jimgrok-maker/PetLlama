@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -51,7 +52,8 @@ import com.jimgrok.petllama.ui.serversViewModelFactory
 fun ServersScreen(
     modifier: Modifier = Modifier,
     viewModel: ServersViewModel = viewModel(factory = serversViewModelFactory),
-    onOpenChat: (Long) -> Unit
+    onOpenChat: (Long) -> Unit,
+    onOpenMcp: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     var editing by remember { mutableStateOf<ServerEntity?>(null) }
@@ -61,6 +63,9 @@ fun ServersScreen(
         topBar = {
             TopAppBar(title = { Text("Servers") },
                 actions = {
+                    IconButton(onClick = onOpenMcp) {
+                        Icon(Icons.Default.Extension, contentDescription = "MCP servers")
+                    }
                     IconButton(onClick = { showAdd = true }) {
                         Icon(Icons.Default.Add, contentDescription = "Add server")
                     }

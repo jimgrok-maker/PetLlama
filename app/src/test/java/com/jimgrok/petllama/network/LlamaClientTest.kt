@@ -128,7 +128,7 @@ class LlamaClientTest {
                     messages = listOf(Msg("user", "Hi")),
                     stream = true
                 )
-            ).toList()
+            ).toList().mapNotNull { (it as? StreamEvent.Content)?.text }
         }
         assertEquals(listOf("Hello", " world"), tokens)
         val hit = seen.single { it.path == "/v1/chat/completions" }

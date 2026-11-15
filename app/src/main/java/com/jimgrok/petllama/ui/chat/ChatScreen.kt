@@ -21,6 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -47,6 +49,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jimgrok.petllama.ui.rememberChatViewModel
@@ -57,7 +60,8 @@ import kotlinx.coroutines.launch
 fun ChatScreen(
     modifier: Modifier = Modifier,
     serverId: Long,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenMcp: () -> Unit = {}
 ) {
     val vm = rememberChatViewModel(serverId)
     val state by vm.state.collectAsState()
@@ -95,6 +99,17 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onOpenMcp) {
+                        Icon(Icons.Default.Extension, contentDescription = "MCP servers")
+                    }
+                    IconButton(onClick = { vm.setToolsEnabled(!state.toolsEnabled) }) {
+                        Icon(
+                            Icons.Default.Build,
+                            contentDescription = if (state.toolsEnabled) "Tools on" else "Tools off",
+                            tint = if (state.toolsEnabled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     IconButton(onClick = { showHistory = true }) {
                         Icon(Icons.Default.History, contentDescription = "History")
                     }
@@ -182,11 +197,20 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(state.messages, key = { it.id }) { msg ->
-                        MessageBubble(
-                            role = msg.role,
-                            content = msg.content,
-                            isStreaming = msg.isStreaming
-                        )
+                        if (msg.role == "tool") {
+                            ToolTraceBubble(
+                                name = msg.toolName ?: "Tool",
+                                arguments = msg.toolArgs,
+                                result = msg.content,
+                                running = msg.isStreaming
+                            )
+                        } else {
+                            MessageBubble(
+                                role = msg.role,
+                                content = msg.content,
+                                isStreaming = msg.isStreaming
+                            )
+                        }
                     }
                 }
             }
@@ -216,6 +240,44 @@ fun ChatScreen(
             onDelete = { vm.deleteConversation(it) },
             onDismiss = { showHistory = false }
         )
+    }
+}
+
+@Composable
+fun ToolTraceBubble(name: String, arguments: String?, result: String, running: Boolean) {
+    var open by remember { mutableStateOf(false) }
+    val preview = result.lineSequence().firstOrNull().orEmpty().take(160)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+            .clickable { open = !open }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(
+            if (running) "Using $name…" else name,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (!open) {
+            if (preview.isNotEmpty()) {
+                Text(
+                    preview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        } else {
+            if (!arguments.isNullOrBlank()) {
+                Text("Arguments", style = MaterialTheme.typography.labelMedium)
+                Text(arguments, style = MaterialTheme.typography.bodySmall)
+            }
+            Text("Result", style = MaterialTheme.typography.labelMedium)
+            Text(result, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 

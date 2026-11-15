@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.ui.chat.ChatScreen
+import com.jimgrok.petllama.ui.mcp.McpServersScreen
 import com.jimgrok.petllama.ui.screens.ServersScreen
 import kotlinx.coroutines.flow.first
 
@@ -25,22 +26,28 @@ import kotlinx.coroutines.flow.first
 fun RootScreen() {
     MaterialTheme(colorScheme = darkColorScheme()) {
         var selectedServerId by remember { mutableStateOf<Long?>(null) }
+        var showMcp by remember { mutableStateOf(false) }
 
         LaunchedEffect(Unit) {
             val first = Db.servers.observeAll().first().firstOrNull()
             if (first != null) selectedServerId = first.id
         }
 
-        if (selectedServerId != null) {
-            ChatScreen(
+        when {
+            showMcp -> McpServersScreen(
+                modifier = Modifier.fillMaxSize(),
+                onBack = { showMcp = false }
+            )
+            selectedServerId != null -> ChatScreen(
                 modifier = Modifier.fillMaxSize(),
                 serverId = selectedServerId!!,
-                onBack = { selectedServerId = null }
+                onBack = { selectedServerId = null },
+                onOpenMcp = { showMcp = true }
             )
-        } else {
-            ServersScreen(
+            else -> ServersScreen(
                 modifier = Modifier.fillMaxSize(),
-                onOpenChat = { serverId -> selectedServerId = serverId }
+                onOpenChat = { serverId -> selectedServerId = serverId },
+                onOpenMcp = { showMcp = true }
             )
         }
     }

@@ -103,7 +103,7 @@ class LlamaClient(private val server: ServerEntity) {
      * Failures close the flow with an error so the collector can show it.
      * Cancelling the collector cancels the HTTP call and ends the flow quietly.
      */
-    fun streamChat(request: ChatRequest): Flow<String> = callbackFlow {
+    fun streamChat(request: ChatRequest): Flow<StreamEvent> = callbackFlow {
         val json = GsonHolder.gson.toJson(request)
         val body = json.toRequestBody("application/json".toMediaType())
         val req = Request.Builder()
@@ -136,7 +136,17 @@ class LlamaClient(private val server: ServerEntity) {
                             }.getOrNull() ?: continue
                             for (choice in chunk.choices.orEmpty()) {
                                 val text = choice.delta?.content
-                                if (!text.isNullOrEmpty()) send(text)
+                                if (!text.isNullOrEmpty()) send(StreamEvent.Content(text))
+                                for (toolCall in choice.delta?.toolCalls.orEmpty()) {
+                                    send(
+                                        StreamEvent.ToolDelta(
+                                            index = toolCall.index,
+                                            id = toolCall.id,
+                                            name = toolCall.function?.name,
+                                            arguments = toolCall.function?.arguments
+                                        )
+                                    )
+                                }
                             }
                         }
                     }

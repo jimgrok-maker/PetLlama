@@ -19,9 +19,13 @@ data class ConversationEntity(
 data class MessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val conversationId: Long,
-    val role: String,          // "user" | "assistant" | "system"
+    val role: String,          // "user" | "assistant" | "system" | "tool"
     val content: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Set on role "tool": "Server name / tool name" shown in the chat. */
+    val toolName: String? = null,
+    /** Raw JSON arguments for a tool bubble. */
+    val toolArgs: String? = null
 )
 
 data class ConversationWithMessages(
