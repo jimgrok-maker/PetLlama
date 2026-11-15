@@ -10,12 +10,22 @@ import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.LlamaClient
 import com.jimgrok.petllama.network.ModelInfo
 import com.jimgrok.petllama.network.Msg
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** A message with a flag marking it as the live-streaming bubble (id not yet persisted). */
+data class UiMessage(
+    val id: Long,
+    val role: String,
+    val content: String,
+    val isStreaming: Boolean = false
+)
 
 class ChatViewModel : ViewModel() {
 
@@ -23,12 +33,11 @@ class ChatViewModel : ViewModel() {
         val server: ServerEntity? = null,
         val models: List<ModelInfo> = emptyList(),
         val selectedModel: String = "",
-        val messages: List<MessageEntity> = emptyList(),
+        val messages: List<UiMessage> = emptyList(),
         val streaming: Boolean = false,
         val error: String? = null,
         val conversations: List<ConversationEntity> = emptyList(),
         val activeConversationId: Long? = null,
-        // params
         val temperature: Float = 0.7f,
         val topP: Float = 0.95f,
         val maxTokens: Int = 512,
@@ -43,7 +52,6 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             val server = Db.servers.getById(serverId) ?: return@launch
             _state.update { it.copy(server = server) }
-            // load models
             try {
                 val models = LlamaClient(server).listModels()
                 _state.update { s ->
@@ -55,7 +63,6 @@ class ChatViewModel : ViewModel() {
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Failed to load models: ${e.message}") }
             }
-            // load conversations for this server
             launch {
                 Db.conversations.observeAll(serverId).collect { convs ->
                     _state.update { it.copy(conversations = convs) }
@@ -70,14 +77,20 @@ class ChatViewModel : ViewModel() {
             val id = Db.conversations.insert(
                 ConversationEntity(serverId = serverId, model = _state.value.selectedModel)
             )
-            _state.update { it.copy(activeConversationId = id, messages = emptyList()) }
+            _state.update { it.copy(activeConversationId = id, messages = emptyList(), error = null) }
         }
     }
 
     fun openConversation(id: Long) {
         viewModelScope.launch {
             val msgs = Db.conversations.messagesFor(id)
-            _state.update { it.copy(activeConversationId = id, messages = msgs, error = null) }
+            _state.update {
+                it.copy(
+                    activeConversationId = id,
+                    messages = msgs.map { m -> UiMessage(m.id, m.role, m.content) },
+                    error = null
+                )
+            }
         }
     }
 
@@ -91,120 +104,12 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun selectModel(id: String) {
-        _state.update { it.copy(selectedModel = id, error = null) }
-    }
-
+    fun selectModel(id: String) = _state.update { it.copy(selectedModel = id, error = null) }
     fun setTemperature(v: Float) = _state.update { it.copy(temperature = v) }
     fun setTopP(v: Float) = _state.update { it.copy(topP = v) }
     fun setMaxTokens(v: Int) = _state.update { it.copy(maxTokens = v) }
     fun setSystemPrompt(v: String) = _state.update { it.copy(systemPrompt = v) }
-
-    fun send(text: String) {
-        val s = _state.value
-        val server = s.server ?: return
-        val model = s.selectedModel.ifEmpty { s.models.firstOrNull()?.id } ?: return
-        if (text.isBlank()) return
-
-        // ensure a conversation exists
-        val convId: Long
-        if (s.activeConversationId != null) {
-            convId = s.activeConversationId!!
-        } else {
-            convId = viewModelScope.run {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    Db.conversations.insert(ConversationEntity(serverId = server.id, model = model))
-                }
-            }
-            _state.update { it.copy(activeConversationId = convId) }
-        }
-
-        // append user message
-        val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
-        viewModelScope.launch {
-            val mid = Db.conversations.insertMessage(userMsg)
-            _state.update { it.copy(messages = it.messages + userMsg.copy(id = mid)) }
-        }
-
-        // build request with history (last N messages to bound context)
-        val history = s.messages.takeLast(20)
-        val messages = mutableListOf<Msg>()
-        if (s.systemPrompt.isNotBlank()) messages += Msg("system", s.systemPrompt)
-        messages += history.map { Msg(it.role, it.content) }
-        messages += Msg("user", text)
-
-        val request = ChatRequest(
-            model = model,
-            messages = messages,
-            stream = true,
-            temperature = s.temperature,
-            topP = s.topP,
-            maxTokens = s.maxTokens
-        )
-
-        _state.update { it.copy(streaming = true, error = null) }
-
-        // placeholder assistant bubble index
-        val assistantId = -1L
-
-        streamJob = viewModelScope.launch {
-            var acc = StringBuilder()
-            val client = LlamaClient(server)
-            try {
-                client.streamChat(request).collect { token ->
-                    acc.append(token)
-                    _state.update { st ->
-                        val list = st.messages.toMutableList()
-                        // replace last assistant message or append
-                        val last = list.lastOrNull { it.role == "assistant" }
-                        if (last != null && last.id < 0) {
-                            list[list.lastIndex] = last.copy(content = acc.toString())
-                        } else {
-                            list += MessageEntity(conversationId = convId, role = "assistant", content = acc.toString())
-                        }
-                        st.copy(messages = list)
-                    }
-                }
-                // persist final assistant message
-                val finalText = acc.toString()
-                val persisted = Db.conversations.insertMessage(
-                    MessageEntity(conversationId = convId, role = "assistant", content = finalText)
-                )
-                _state.update { st ->
-                    val list = st.messages.toMutableList()
-                    if (list.isNotEmpty() && list.last().role == "assistant") {
-                        list[list.lastIndex] = list.last().copy(id = persisted, content = finalText)
-                    }
-                    st.copy(messages = list)
-                }
-                // bump conversation updatedAt + title from first user msg
-                val conv = Db.conversations.getById(convId)
-                if (conv != null) {
-                    val firstUser = st_firstUser(st.messages)
-                    val newConv = conv.copy(
-                        updatedAt = System.currentTimeMillis(),
-                        title = if (conv.title == "New chat") firstUser.take(40) else conv.title
-                    )
-                    Db.conversations.update(newConv)
-                }
-            } catch (e: Exception) {
-                // keep partial if we have some
-                if (acc.isNotEmpty()) {
-                    Db.conversations.insertMessage(
-                        MessageEntity(conversationId = convId, role = "assistant", content = acc.toString())
-                    )
-                }
-                _state.update { it.copy(error = e.message ?: "stream error") }
-            } finally {
-                _state.update { it.copy(streaming = false) }
-            }
-        }
-    }
-
-    private fun st_firstUser(msgs: List<MessageEntity>): String {
-        val s = _state.value
-        return msgs.firstOrNull { it.role == "user" }?.content ?: "New chat"
-    }
+    fun clearError() = _state.update { it.copy(error = null) }
 
     fun stop() {
         streamJob?.cancel()
@@ -212,5 +117,134 @@ class ChatViewModel : ViewModel() {
         _state.update { it.copy(streaming = false) }
     }
 
-    fun clearError() = _state.update { it.copy(error = null) }
+    fun send(text: String) {
+        if (text.isBlank() || _state.value.streaming) return
+        val s = _state.value
+        val server = s.server ?: return
+        val model = s.selectedModel.ifEmpty { s.models.firstOrNull()?.id } ?: return
+
+        viewModelScope.launch {
+            val convId = s.activeConversationId ?: withContext(Dispatchers.IO) {
+                val id = Db.conversations.insert(
+                    ConversationEntity(serverId = server.id, model = model)
+                )
+                _state.update { it.copy(activeConversationId = id) }
+                id
+            }
+
+            // persist + append user message
+            val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
+            val mid = withContext(Dispatchers.IO) { Db.conversations.insertMessage(userMsg) }
+            _state.update { st ->
+                st.copy(messages = st.messages + UiMessage(mid, "user", text))
+            }
+
+            // build request: system + last 20 history + new user
+            val history = _state.value.messages.filter { it.id >= 0 }.takeLast(20)
+            val msgs = mutableListOf<Msg>()
+            if (s.systemPrompt.isNotBlank()) msgs += Msg("system", s.systemPrompt)
+            msgs += history.map { Msg(it.role, it.content) }
+            msgs += Msg("user", text)
+
+            val request = ChatRequest(
+                model = model,
+                messages = msgs,
+                stream = true,
+                temperature = s.temperature,
+                topP = s.topP,
+                maxTokens = s.maxTokens
+            )
+
+            _state.update { it.copy(streaming = true, error = null) }
+
+            var acc = StringBuilder()
+            var persistedId = -1L
+            val client = LlamaClient(server)
+
+            streamJob = launch {
+                try {
+                    client.streamChat(request).collect { token ->
+                        acc.append(token)
+                        _state.update { st ->
+                            val list = st.messages.toMutableList()
+                            val lastIdx = list.indexOfLast { it.isStreaming }
+                            if (lastIdx >= 0) {
+                                list[lastIdx] = list[lastIdx].copy(content = acc.toString())
+                            } else {
+                                list += UiMessage(-1L, "assistant", acc.toString(), isStreaming = true)
+                            }
+                            st.copy(messages = list)
+                        }
+                    }
+
+                    // persist final (or partial on stop) assistant text
+                    val finalText = acc.toString()
+                    if (finalText.isNotEmpty()) {
+                        persistedId = withContext(Dispatchers.IO) {
+                            Db.conversations.insertMessage(
+                                MessageEntity(conversationId = convId, role = "assistant", content = finalText)
+                            )
+                        }
+                    }
+                    finalizeAssistant(convId, finalText, persistedId)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // stop pressed — keep partial
+                    val partial = acc.toString()
+                    if (partial.isNotEmpty()) {
+                        persistedId = withContext(Dispatchers.IO) {
+                            Db.conversations.insertMessage(
+                                MessageEntity(conversationId = convId, role = "assistant", content = partial)
+                            )
+                        }
+                    }
+                    finalizeAssistant(convId, partial, persistedId)
+                } catch (e: Exception) {
+                    val partial = acc.toString()
+                    if (partial.isNotEmpty()) {
+                        persistedId = withContext(Dispatchers.IO) {
+                            Db.conversations.insertMessage(
+                                MessageEntity(conversationId = convId, role = "assistant", content = partial)
+                            )
+                        }
+                        finalizeAssistant(convId, partial, persistedId)
+                    }
+                    _state.update { it.copy(error = e.message ?: "stream error") }
+                } finally {
+                    _state.update { it.copy(streaming = false) }
+                }
+            }
+        }
+    }
+
+    /** Replace the streaming placeholder with the persisted assistant message. */
+    private fun finalizeAssistant(convId: Long, finalText: String, persistedId: Long) {
+        _state.update { st ->
+            val list = st.messages.toMutableList()
+            val lastIdx = list.indexOfLast { it.isStreaming }
+            if (lastIdx >= 0 && finalText.isNotEmpty()) {
+                list[lastIdx] = UiMessage(persistedId, "assistant", finalText)
+            } else if (lastIdx >= 0) {
+                list.removeAt(lastIdx) // empty stream, drop placeholder
+            }
+            // bump conversation title + updatedAt
+            val firstUser = list.firstOrNull { it.role == "user" }?.content
+            st.copy(messages = list).also {
+                // side effect below
+            }
+            // schedule title bump
+            launchTitleBump(convId, firstUser)
+            st.copy(messages = list)
+        }
+    }
+
+    private fun launchTitleBump(convId: Long, firstUser: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val conv = Db.conversations.getById(convId) ?: return@launch
+            val newConv = conv.copy(
+                updatedAt = System.currentTimeMillis(),
+                title = if (conv.title == "New chat" && firstUser != null) firstUser.take(40) else conv.title
+            )
+            Db.conversations.update(newConv)
+        }
+    }
 }
