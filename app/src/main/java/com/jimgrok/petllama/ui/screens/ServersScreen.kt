@@ -14,14 +14,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -30,7 +31,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,15 +39,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jimgrok.petllama.data.ServerEntity
 import com.jimgrok.petllama.ui.ServersViewModel
-import com.jimgrok.petllama.ui.viewmodelFactory
+import com.jimgrok.petllama.ui.serversViewModelFactory
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServersScreen(
     modifier: Modifier = Modifier,
-    viewModel: ServersViewModel = androidx.lifecycle.viewmodel.compose.viewModel(factory = viewmodelFactory),
+    viewModel: ServersViewModel = viewModel(factory = serversViewModelFactory),
     onOpenChat: (Long) -> Unit
 ) {
     val state by viewModel.state.collectAsState()
@@ -136,7 +137,7 @@ fun ServerCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(server.name, style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f))
-                IconButton(onClick = onEdit) { Icon(Icons.Default.Add, contentDescription = "Edit") }
+                IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, contentDescription = "Edit") }
                 IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, contentDescription = "Delete") }
             }
             Text(server.url, style = MaterialTheme.typography.bodySmall,
@@ -145,7 +146,7 @@ fun ServerCard(
                 Text(testResult, style = MaterialTheme.typography.bodySmall,
                     color = if (testResult.startsWith("\u2705")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
-            Spacer(height = 8.dp)
+            Spacer(Modifier.height(8.dp))
             Row {
                 OutlinedButton(onClick = onTest, enabled = !isTesting) {
                     Icon(Icons.Default.Refresh, null)
@@ -173,7 +174,7 @@ fun ServerEditSheet(
     var key by remember { mutableStateOf(initialKey) }
 
     val sheetState = rememberModalBottomSheetState()
-    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(modifier = Modifier.padding(24.dp).padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleLarge)
