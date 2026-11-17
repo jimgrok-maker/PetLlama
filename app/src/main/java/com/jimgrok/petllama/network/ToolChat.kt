@@ -84,6 +84,7 @@ suspend fun runToolLoop(
     callTool: suspend (ExposedTool, String) -> McpCallResult,
     maxToolRounds: Int = 8,
     onContent: (String) -> Unit,
+    onMetrics: (CompletionStats) -> Unit = {},
     onRoundDone: suspend () -> Unit,
     onToolStart: suspend (serverName: String, toolName: String, arguments: String) -> Unit,
     onToolResult: suspend (ToolTrace) -> Unit
@@ -107,6 +108,7 @@ suspend fun runToolLoop(
                             roundText.append(event.text)
                             onContent(event.text)
                         }
+                        is StreamEvent.Metrics -> onMetrics(event.stats)
                         is StreamEvent.ToolDelta -> {
                             val partial = partials.getOrPut(event.index) { PartialCall() }
                             if (!event.id.isNullOrEmpty()) partial.id = event.id

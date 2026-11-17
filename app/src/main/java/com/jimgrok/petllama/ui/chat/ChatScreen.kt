@@ -32,6 +32,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -49,9 +50,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.jimgrok.petllama.network.ContextBand
+import com.jimgrok.petllama.network.contextFill
+import com.jimgrok.petllama.network.formatSpeed
+import com.jimgrok.petllama.network.formatTokenCount
 import com.jimgrok.petllama.ui.rememberChatViewModel
 import kotlinx.coroutines.launch
 
@@ -147,6 +153,13 @@ fun ChatScreen(
         }
     ) { padding ->
         Column(modifier = modifier.fillMaxSize().padding(padding)) {
+            ChatStatusStrip(
+                tokensPerSecond = state.tokensPerSecond,
+                promptPerSecond = state.promptPerSecond,
+                speedLive = state.speedLive,
+                usedTokens = state.usedTokens,
+                contextSize = state.contextSize
+            )
             // model picker row
             if (state.models.size > 1) {
                 Row(
@@ -277,6 +290,68 @@ fun ToolTraceBubble(name: String, arguments: String?, result: String, running: B
             }
             Text("Result", style = MaterialTheme.typography.labelMedium)
             Text(result, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun ChatStatusStrip(
+    tokensPerSecond: Double?,
+    promptPerSecond: Double?,
+    speedLive: Boolean,
+    usedTokens: Int?,
+    contextSize: Int?
+) {
+    val fill = contextFill(usedTokens, contextSize)
+    if (tokensPerSecond == null && promptPerSecond == null && fill == null && usedTokens == null) return
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(0.42f)) {
+            val speed = when {
+                tokensPerSecond == null -> "— tok/s"
+                speedLive -> "${formatSpeed(tokensPerSecond)} tok/s"
+                else -> "${formatSpeed(tokensPerSecond)} tok/s"
+            }
+            Text(speed, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            promptPerSecond?.let {
+                Text(
+                    "prompt ${formatSpeed(it)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+        }
+        Column(modifier = Modifier.weight(0.58f)) {
+            when {
+                fill != null -> {
+                    val color = when (fill.band) {
+                        ContextBand.GREEN -> Color(0xFF3DDC84)
+                        ContextBand.YELLOW -> Color(0xFFFFC107)
+                        ContextBand.RED -> MaterialTheme.colorScheme.error
+                    }
+                    LinearProgressIndicator(
+                        progress = fill.fraction,
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = color,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    Text(
+                        "${formatTokenCount(fill.used)} / ${formatTokenCount(fill.context)}  ${(fill.fraction * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = color,
+                        maxLines = 1
+                    )
+                }
+                usedTokens != null -> Text(
+                    "${formatTokenCount(usedTokens)} tokens",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
