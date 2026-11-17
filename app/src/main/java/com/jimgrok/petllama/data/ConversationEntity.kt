@@ -1,5 +1,6 @@
 package com.jimgrok.petllama.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.Relation
@@ -25,7 +26,11 @@ data class MessageEntity(
     /** Set on role "tool": "Server name / tool name" shown in the chat. */
     val toolName: String? = null,
     /** Raw JSON arguments for a tool bubble. */
-    val toolArgs: String? = null
+    val toolArgs: String? = null,
+    /** Model reasoning, from reasoning_content or think tags. Not sent back as the answer. */
+    val reasoning: String? = null,
+    @ColumnInfo(defaultValue = "0")
+    val toolError: Boolean = false
 )
 
 data class ConversationWithMessages(

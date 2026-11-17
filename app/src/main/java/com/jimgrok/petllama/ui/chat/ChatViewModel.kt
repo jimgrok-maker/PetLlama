@@ -36,7 +36,9 @@ data class UiMessage(
     val content: String,
     val isStreaming: Boolean = false,
     val toolName: String? = null,
-    val toolArgs: String? = null
+    val toolArgs: String? = null,
+    val reasoning: String? = null,
+    val toolError: Boolean = false
 )
 
 class ChatViewModel : ViewModel() {
@@ -126,7 +128,9 @@ class ChatViewModel : ViewModel() {
                             role = m.role,
                             content = m.content,
                             toolName = m.toolName,
-                            toolArgs = m.toolArgs
+                            toolArgs = m.toolArgs,
+                            reasoning = m.reasoning,
+                            toolError = m.toolError
                         )
                     },
                     error = null
@@ -152,6 +156,37 @@ class ChatViewModel : ViewModel() {
     fun setSystemPrompt(v: String) = _state.update { it.copy(systemPrompt = v) }
     fun setToolsEnabled(enabled: Boolean) = _state.update { it.copy(toolsEnabled = enabled) }
     fun clearError() = _state.update { it.copy(error = null) }
+
+    /** Drops this user message and everything after it, then sends the edited text. */
+    fun editAndResend(messageId: Long, newText: String) {
+        if (newText.isBlank() || _state.value.streaming) return
+        val convId = _state.value.activeConversationId ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Db.conversations.deleteMessagesFrom(convId, messageId) }
+            _state.update { st -> st.copy(messages = st.messages.filter { it.id < messageId }) }
+            send(newText)
+        }
+    }
+
+    /** Deletes the reply after the last user message and asks the model again. */
+    fun regenerate() {
+        if (_state.value.streaming) return
+        val messages = _state.value.messages
+        val lastUser = messages.lastOrNull { it.role == "user" && it.id >= 0 } ?: return
+        val convId = _state.value.activeConversationId ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                Db.conversations.deleteMessagesFrom(convId, lastUser.id + 1)
+            }
+            _state.update { st -> st.copy(messages = st.messages.filter { it.id <= lastUser.id }) }
+            beginSend(lastUser.content, reuseExistingUser = true)
+        }
+    }
+
+    fun continueReply() {
+        if (_state.value.streaming) return
+        send("Continue.")
+    }
 
     fun stop() {
         streamJob?.cancel()
@@ -193,13 +228,44 @@ class ChatViewModel : ViewModel() {
             _state.update { st -> st.copy(messages = st.messages.filterNot { it.id == streaming.id }) }
             return
         }
+        val split = extractThinkTags(streaming.content)
+        val reasoning = listOfNotNull(streaming.reasoning, split.reasoning.takeIf { it.isNotEmpty() })
+            .joinToString("\n\n")
+            .ifBlank { null }
         val savedId = persistMessage(
-            MessageEntity(conversationId = convId, role = "assistant", content = streaming.content)
+            MessageEntity(
+                conversationId = convId,
+                role = "assistant",
+                content = split.answer.ifBlank { streaming.content },
+                reasoning = reasoning
+            )
         )
         _state.update { st ->
             st.copy(messages = st.messages.map { msg ->
-                if (msg.id == streaming.id) msg.copy(id = savedId, isStreaming = false) else msg
+                if (msg.id == streaming.id) {
+                    msg.copy(
+                        id = savedId,
+                        content = split.answer.ifBlank { streaming.content },
+                        reasoning = reasoning,
+                        isStreaming = false
+                    )
+                } else {
+                    msg
+                }
             })
+        }
+    }
+
+    private fun appendReasoning(chunk: String) {
+        _state.update { st ->
+            val list = st.messages.toMutableList()
+            val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
+            if (idx >= 0) {
+                list[idx] = list[idx].copy(reasoning = (list[idx].reasoning ?: "") + chunk)
+            } else {
+                list += UiMessage(tempId(), "assistant", "", isStreaming = true, reasoning = chunk)
+            }
+            st.copy(messages = list)
         }
     }
 
@@ -224,7 +290,9 @@ class ChatViewModel : ViewModel() {
         return catalog.takeIf { it.tools.isNotEmpty() }
     }
 
-    fun send(text: String) {
+    fun send(text: String) = beginSend(text, reuseExistingUser = false)
+
+    private fun beginSend(text: String, reuseExistingUser: Boolean) {
         if (text.isBlank() || _state.value.streaming) return
         val s = _state.value
         val server = s.server ?: return
@@ -243,10 +311,14 @@ class ChatViewModel : ViewModel() {
                 id
             }
 
-            val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
-            val mid = persistMessage(userMsg)
-            _state.update { st ->
-                st.copy(messages = st.messages + UiMessage(mid, "user", text), streaming = true, error = null)
+            if (!reuseExistingUser) {
+                val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
+                val mid = persistMessage(userMsg)
+                _state.update { st ->
+                    st.copy(messages = st.messages + UiMessage(mid, "user", text), streaming = true, error = null)
+                }
+            } else {
+                _state.update { it.copy(streaming = true, error = null) }
             }
 
             val messages = outgoingMessages(_state.value.messages, s.systemPrompt).toMutableList()
@@ -290,6 +362,7 @@ class ChatViewModel : ViewModel() {
                             }
                         },
                         onMetrics = { stats -> applyServerStats(stats) },
+                        onReasoning = { chunk -> appendReasoning(chunk) },
                         onRoundDone = {
                             finishAssistantBubble(convId)
                             liveSpeed.reset()
@@ -319,7 +392,8 @@ class ChatViewModel : ViewModel() {
                                     role = "tool",
                                     content = trace.result,
                                     toolName = "${trace.serverName} / ${trace.toolName}",
-                                    toolArgs = trace.arguments
+                                    toolArgs = trace.arguments,
+                                    toolError = trace.isError
                                 )
                             )
                             _state.update { st ->
@@ -330,7 +404,8 @@ class ChatViewModel : ViewModel() {
                                     role = "tool",
                                     content = trace.result,
                                     toolName = "${trace.serverName} / ${trace.toolName}",
-                                    toolArgs = trace.arguments
+                                    toolArgs = trace.arguments,
+                                    toolError = trace.isError
                                 )
                                 if (idx >= 0) list[idx] = bubble else list += bubble
                                 st.copy(messages = list)

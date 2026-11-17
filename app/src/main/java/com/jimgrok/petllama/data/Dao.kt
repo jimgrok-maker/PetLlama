@@ -59,6 +59,9 @@ interface ConversationDao {
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesFor(conversationId: Long)
 
+    @Query("DELETE FROM messages WHERE conversationId = :conversationId AND id >= :fromId")
+    suspend fun deleteMessagesFrom(conversationId: Long, fromId: Long)
+
     /** Removes the conversation and the messages that belong to it. */
     @Transaction
     suspend fun deleteConversation(conversation: ConversationEntity) {
