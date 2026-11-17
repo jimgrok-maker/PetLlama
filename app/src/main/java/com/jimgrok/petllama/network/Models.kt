@@ -48,6 +48,7 @@ sealed class StreamEvent {
         val name: String?,
         val arguments: String?
     ) : StreamEvent()
+    data class Metrics(val stats: CompletionStats) : StreamEvent()
 }
 
 data class ChatRequest(

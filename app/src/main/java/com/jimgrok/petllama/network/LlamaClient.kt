@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
@@ -135,6 +136,7 @@ class LlamaClient(private val server: ServerEntity) {
                             if (line.isEmpty() || !line.startsWith("data:")) continue
                             val payload = line.removePrefix("data:").trim()
                             if (payload == "[DONE]") break
+                            parseCompletionStats(payload)?.let { send(StreamEvent.Metrics(it)) }
                             val chunk = runCatching {
                                 GsonHolder.gson.fromJson(payload, ChatChunk::class.java)
                             }.getOrNull() ?: continue
@@ -163,6 +165,35 @@ class LlamaClient(private val server: ServerEntity) {
             }
         }
         awaitClose { call.cancel() }
+    }
+
+    /**
+     * Context length from llama-server. Tries /props, then /slots.
+     * Missing or broken endpoints return null so the meter can hide itself.
+     */
+    suspend fun contextLength(): Int? = withContext(Dispatchers.IO) {
+        val props = getQuiet("/props")
+        if (props != null) {
+            parseContextSize(props)?.let { return@withContext it }
+        }
+        val slots = getQuiet("/slots")
+        if (slots != null) parseContextSize(slots) else null
+    }
+
+    private fun getQuiet(path: String): String? {
+        val call = client.newCall(
+            Request.Builder()
+                .url(endpoint(baseUrl(), path))
+                .withApiKey(server.apiKey)
+                .build()
+        )
+        return try {
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) null else resp.body?.string()
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     companion object {

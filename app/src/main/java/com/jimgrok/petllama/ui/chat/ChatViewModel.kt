@@ -8,7 +8,9 @@ import com.jimgrok.petllama.data.MessageEntity
 import com.jimgrok.petllama.data.ServerEntity
 import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.network.ChatRequest
+import com.jimgrok.petllama.network.CompletionStats
 import com.jimgrok.petllama.network.ExposedTool
+import com.jimgrok.petllama.network.LiveTokenSpeed
 import com.jimgrok.petllama.network.LlamaClient
 import com.jimgrok.petllama.network.McpClient
 import com.jimgrok.petllama.network.toUserMessage
@@ -53,7 +55,12 @@ class ChatViewModel : ViewModel() {
         val maxTokens: Int = 512,
         val systemPrompt: String = "",
         /** When on, enabled MCP servers are offered to the model for this chat. */
-        val toolsEnabled: Boolean = true
+        val toolsEnabled: Boolean = true,
+        val tokensPerSecond: Double? = null,
+        val promptPerSecond: Double? = null,
+        val speedLive: Boolean = false,
+        val usedTokens: Int? = null,
+        val contextSize: Int? = null
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -61,6 +68,8 @@ class ChatViewModel : ViewModel() {
     private var streamJob: Job? = null
     private var loadJob: Job? = null
     private var nextTempId = -1L
+    private val liveSpeed = LiveTokenSpeed()
+    private var contextLoadedFor: Long? = null
 
     fun init(serverId: Long) {
         // The screen calls this again after rotation. The load job stays active
@@ -83,6 +92,11 @@ class ChatViewModel : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Failed to load models: ${e.message}") }
+            }
+            if (contextLoadedFor != serverId) {
+                val nCtx = runCatching { LlamaClient(server).contextLength() }.getOrNull()
+                contextLoadedFor = serverId
+                if (nCtx != null) _state.update { it.copy(contextSize = nCtx) }
             }
             Db.conversations.observeAll(serverId).collect { convs ->
                 _state.update { it.copy(conversations = convs) }
@@ -147,6 +161,17 @@ class ChatViewModel : ViewModel() {
 
     private suspend fun persistMessage(message: MessageEntity): Long =
         withContext(Dispatchers.IO) { Db.conversations.insertMessage(message) }
+
+    private fun applyServerStats(stats: CompletionStats) {
+        _state.update { st ->
+            st.copy(
+                tokensPerSecond = stats.predictedPerSecond ?: st.tokensPerSecond,
+                promptPerSecond = stats.promptPerSecond ?: st.promptPerSecond,
+                usedTokens = stats.usedTokens ?: st.usedTokens,
+                speedLive = stats.predictedPerSecond == null
+            )
+        }
+    }
 
     private fun appendAssistantChunk(chunk: String) {
         _state.update { st ->
@@ -233,6 +258,8 @@ class ChatViewModel : ViewModel() {
                 var error: String? = null
                 try {
                     GenerationGuard.start()
+                    liveSpeed.reset()
+                    _state.update { it.copy(speedLive = true, tokensPerSecond = null, promptPerSecond = null) }
                     val catalog = if (s.toolsEnabled) loadCatalog() else null
                     runToolLoop(
                         llama = client,
@@ -253,8 +280,21 @@ class ChatViewModel : ViewModel() {
                             val mcp = sessions.getOrPut(exposed.server.id) { McpClient(exposed.server) }
                             mcp.callTool(exposed.tool.name, args)
                         },
-                        onContent = { chunk -> appendAssistantChunk(chunk) },
-                        onRoundDone = { finishAssistantBubble(convId) },
+                        onContent = { chunk ->
+                            appendAssistantChunk(chunk)
+                            val speed = liveSpeed.onContentDelta()
+                            if (speed != null) {
+                                _state.update { st ->
+                                    if (st.speedLive) st.copy(tokensPerSecond = speed) else st
+                                }
+                            }
+                        },
+                        onMetrics = { stats -> applyServerStats(stats) },
+                        onRoundDone = {
+                            finishAssistantBubble(convId)
+                            liveSpeed.reset()
+                            _state.update { it.copy(speedLive = false) }
+                        },
                         onToolStart = { serverName, toolName, arguments ->
                             val id = tempId()
                             toolBubbleId = id
