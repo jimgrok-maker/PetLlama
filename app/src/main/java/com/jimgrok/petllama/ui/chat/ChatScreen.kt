@@ -1,7 +1,15 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.jimgrok.petllama.ui.chat
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,11 +30,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,7 +63,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jimgrok.petllama.network.ContextBand
@@ -59,6 +75,10 @@ import com.jimgrok.petllama.network.contextFill
 import com.jimgrok.petllama.network.formatSpeed
 import com.jimgrok.petllama.network.formatTokenCount
 import com.jimgrok.petllama.ui.rememberChatViewModel
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
+import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TablePlugin
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -78,6 +98,8 @@ fun ChatScreen(
     var showHistory by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var showModelMenu by remember { mutableStateOf(false) }
+    var menuMessage by remember { mutableStateOf<UiMessage?>(null) }
+    var editing by remember { mutableStateOf<UiMessage?>(null) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -215,13 +237,17 @@ fun ChatScreen(
                                 name = msg.toolName ?: "Tool",
                                 arguments = msg.toolArgs,
                                 result = msg.content,
-                                running = msg.isStreaming
+                                running = msg.isStreaming,
+                                failed = msg.toolError,
+                                onLongClick = { menuMessage = msg }
                             )
                         } else {
                             MessageBubble(
                                 role = msg.role,
                                 content = msg.content,
-                                isStreaming = msg.isStreaming
+                                reasoning = msg.reasoning,
+                                isStreaming = msg.isStreaming,
+                                onLongClick = { menuMessage = msg }
                             )
                         }
                     }
@@ -244,6 +270,48 @@ fun ChatScreen(
         )
     }
 
+    val clipboardContext = LocalContext.current
+    menuMessage?.let { msg ->
+        val lastAssistant = state.messages.lastOrNull { it.role == "assistant" && !it.isStreaming }
+        DropdownMenu(expanded = true, onDismissRequest = { menuMessage = null }) {
+            DropdownMenuItem(
+                text = { Text("Copy") },
+                onClick = {
+                    copyToClipboard(clipboardContext, msg.content)
+                    menuMessage = null
+                }
+            )
+            if (msg.role == "user" && !state.streaming) {
+                DropdownMenuItem(
+                    text = { Text("Edit and resend") },
+                    onClick = { editing = msg; menuMessage = null }
+                )
+            }
+            if (msg.role == "assistant" && msg.id == lastAssistant?.id && !state.streaming) {
+                DropdownMenuItem(text = { Text("Regenerate") }, onClick = { vm.regenerate(); menuMessage = null })
+                DropdownMenuItem(text = { Text("Continue") }, onClick = { vm.continueReply(); menuMessage = null })
+            }
+        }
+    }
+
+    editing?.let { msg ->
+        var draft by remember(msg.id) { mutableStateOf(msg.content) }
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text("Edit message") },
+            text = {
+                OutlinedTextField(value = draft, onValueChange = { draft = it }, modifier = Modifier.fillMaxWidth())
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.editAndResend(msg.id, draft)
+                    editing = null
+                }) { Text("Resend") }
+            },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } }
+        )
+    }
+
     if (showHistory) {
         HistorySheet(
             conversations = state.conversations,
@@ -257,39 +325,47 @@ fun ChatScreen(
 }
 
 @Composable
-fun ToolTraceBubble(name: String, arguments: String?, result: String, running: Boolean) {
+fun ToolTraceBubble(
+    name: String,
+    arguments: String?,
+    result: String,
+    running: Boolean,
+    failed: Boolean,
+    onLongClick: () -> Unit
+) {
     var open by remember { mutableStateOf(false) }
-    val preview = result.lineSequence().firstOrNull().orEmpty().take(160)
+    var showAll by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-            .clickable { open = !open }
+            .combinedClickable(onClick = { open = !open }, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Text(
-            if (running) "Using $name…" else name,
-            style = MaterialTheme.typography.titleSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        if (!open) {
-            if (preview.isNotEmpty()) {
-                Text(
-                    preview,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            when {
+                running -> CircularProgressIndicator(modifier = Modifier.height(14.dp).padding(end = 6.dp), strokeWidth = 2.dp)
+                failed -> Icon(Icons.Default.Error, contentDescription = "Failed", tint = MaterialTheme.colorScheme.error, modifier = Modifier.padding(end = 6.dp))
+                else -> Icon(Icons.Default.Check, contentDescription = "Done", tint = Color(0xFF3DDC84), modifier = Modifier.padding(end = 6.dp))
             }
-        } else {
+            Text(
+                name,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        if (open) {
             if (!arguments.isNullOrBlank()) {
                 Text("Arguments", style = MaterialTheme.typography.labelMedium)
-                Text(arguments, style = MaterialTheme.typography.bodySmall)
+                PrettyBlock(arguments, showAll)
             }
             Text("Result", style = MaterialTheme.typography.labelMedium)
-            Text(result, style = MaterialTheme.typography.bodySmall)
+            PrettyBlock(result, showAll)
+            if (!showAll && (arguments.orEmpty().length + result.length) > 900) {
+                TextButton(onClick = { showAll = true }) { Text("Show more") }
+            }
         }
     }
 }
@@ -357,27 +433,132 @@ fun ChatStatusStrip(
 }
 
 @Composable
-fun MessageBubble(role: String, content: String, isStreaming: Boolean) {
+private fun PrettyBlock(raw: String, showAll: Boolean) {
+    val pretty = remember(raw) { prettyPrint(raw) }
+    val shown = if (showAll || pretty.length <= 900) pretty else pretty.take(900) + "…"
+    Text(shown, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+}
+
+private fun prettyPrint(raw: String): String {
+    val parsed = runCatching { JsonParser.parseString(raw) }.getOrNull() ?: return raw
+    return GsonBuilder().setPrettyPrinting().create().toJson(parsed)
+}
+
+@Composable
+fun MessageBubble(
+    role: String,
+    content: String,
+    reasoning: String?,
+    isStreaming: Boolean,
+    onLongClick: () -> Unit
+) {
     val isUser = role == "user"
     val bg = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
     val fg = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-    Row(modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
+    val split = if (isUser) ReasonedText("", content, false) else extractThinkTags(content)
+    val thought = listOfNotNull(reasoning?.takeIf { it.isNotBlank() }, split.reasoning.takeIf { it.isNotEmpty() })
+        .joinToString("\n\n")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
         Column(
             modifier = Modifier
                 .padding(vertical = 2.dp)
                 .weight(1f, fill = false)
                 .background(bg, RoundedCornerShape(16.dp))
+                .combinedClickable(onClick = {}, onLongClick = onLongClick)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
-            if (content.isNotEmpty()) {
-                Text(content, style = MaterialTheme.typography.bodyLarge, color = fg)
-            } else if (isStreaming) {
+            if (thought.isNotEmpty() || split.stillThinking) {
+                ThinkingBlock(thought.ifBlank { "…" }, split.stillThinking || isStreaming && split.answer.isEmpty())
+            }
+            val answer = if (isUser) content else split.answer
+            if (answer.isNotEmpty()) {
+                if (isUser) {
+                    Text(answer, style = MaterialTheme.typography.bodyLarge, color = fg)
+                } else {
+                    MarkdownAnswer(answer, fg)
+                }
+            } else if (isStreaming && thought.isEmpty()) {
                 Text("\u2026", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
+}
+
+@Composable
+private fun ThinkingBlock(text: String, active: Boolean) {
+    var open by remember { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth().clickable { open = !open }.padding(bottom = 6.dp)) {
+        Text(
+            if (active) "Thinking…" else "Thought",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (open) {
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun MarkdownAnswer(markdown: String, color: Color) {
+    val blocks = remember(markdown) { splitFencedCode(markdown) }
+    val context = LocalContext.current
+    val markwon = remember(context) {
+        Markwon.builder(context).usePlugin(TablePlugin.create(context)).build()
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (block in blocks) {
+            when (block) {
+                is MarkdownBlock.Prose -> AndroidView(
+                    factory = { ctx ->
+                        TextView(ctx).apply {
+                            setTextColor(color.toArgb())
+                            textSize = 16f
+                        }
+                    },
+                    update = { view ->
+                        view.setTextColor(color.toArgb())
+                        markwon.setMarkdown(view, block.markdown)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeBlock(language: String, code: String) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp))
+            .padding(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                language.ifBlank { "code" },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFBBBBBB),
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { copyToClipboard(context, code) }) { Text("Copy") }
+        }
+        Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+            Text(code, fontFamily = FontFamily.Monospace, color = Color(0xFFECECEC), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("PetLlama", text))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

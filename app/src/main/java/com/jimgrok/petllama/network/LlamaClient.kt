@@ -143,6 +143,8 @@ class LlamaClient(private val server: ServerEntity) {
                             for (choice in chunk.choices.orEmpty()) {
                                 val text = choice.delta?.content
                                 if (!text.isNullOrEmpty()) send(StreamEvent.Content(text))
+                                val reasoning = choice.delta?.reasoningContent
+                                if (!reasoning.isNullOrEmpty()) send(StreamEvent.Reasoning(reasoning))
                                 for (toolCall in choice.delta?.toolCalls.orEmpty()) {
                                     send(
                                         StreamEvent.ToolDelta(

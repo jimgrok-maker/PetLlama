@@ -31,10 +31,17 @@ object Db {
         }
     }
 
+    private val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE `messages` ADD COLUMN `reasoning` TEXT")
+            db.execSQL("ALTER TABLE `messages` ADD COLUMN `toolError` INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     fun init(context: Context) {
         if (this::db.isInitialized) return
         db = Room.databaseBuilder(context, PetLlamaDatabase::class.java, "petllama.db")
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .fallbackToDestructiveMigration()
             .build()
     }

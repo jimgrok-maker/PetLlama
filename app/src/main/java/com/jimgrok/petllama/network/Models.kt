@@ -25,6 +25,7 @@ data class ChatChunk(
     data class Delta(
         @SerializedName("role") val role: String? = null,
         @SerializedName("content") val content: String? = null,
+        @SerializedName("reasoning_content") val reasoningContent: String? = null,
         @SerializedName("tool_calls") val toolCalls: List<ToolCallDelta>? = null
     )
     data class ToolCallDelta(
@@ -42,6 +43,7 @@ data class ChatChunk(
 /** One piece of a streamed chat completion. */
 sealed class StreamEvent {
     data class Content(val text: String) : StreamEvent()
+    data class Reasoning(val text: String) : StreamEvent()
     data class ToolDelta(
         val index: Int,
         val id: String?,
