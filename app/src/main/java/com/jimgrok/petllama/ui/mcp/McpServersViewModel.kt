@@ -63,6 +63,16 @@ class McpServersViewModel : ViewModel() {
         return true
     }
 
+    /**
+     * Saves a built-in preset as a new row, always turned off.
+     * Does not update servers that are already in the list.
+     */
+    fun addPreset(preset: McpPreset, url: String): Boolean {
+        val server = preset.serverFor(url) ?: return false
+        viewModelScope.launch { Db.mcp.upsert(server.copy(id = 0, enabled = false)) }
+        return true
+    }
+
     fun setEnabled(server: McpServerEntity, enabled: Boolean) {
         viewModelScope.launch { Db.mcp.update(server.copy(enabled = enabled)) }
     }

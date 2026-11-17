@@ -55,7 +55,9 @@ llama-server -m your-model.gguf --host 0.0.0.0 --port 8080 --jinja
 4. Tap **Test**. A good result looks like `12 tool(s) from searx`. The switch on the card turns that server on or off. Only enabled servers are offered to the model.
 5. In chat, leave the wrench highlighted and send a message. When the model calls a tool, a short row appears with the server, the tool, the arguments, and the result. Tap the row to expand it. Stop still cuts the reply off.
 
-A GitHub MCP server often has a few dozen tools and wants a bearer token. SearXNG is usually one search tool and no token. You type the URLs yourself; the app does not guess them.
+A GitHub MCP server often has a few dozen tools and wants a bearer token. SearXNG is usually one search tool and no token. Add those with **+** and type the URL yourself.
+
+The same screen has built-in presets for **Fetch**, **Time**, and **Filesystem**. Each **Add** saves that server turned off, aimed at `192.168.1.250` (ports 8089, 8090, and 8091). Change the URL first if yours is different, then Test and flip the switch. How to run the three servers on the home machine is in [docs/MCP_PRESETS.md](docs/MCP_PRESETS.md). Adding a preset does not change a GitHub or SearXNG server you already saved.
 
 If a server is down, or a tool returns an error, that text is given back to the model so it can still answer. The chat does not crash. Test shows the real error (HTTP status and message), not a bare "failed".
 

@@ -91,6 +91,10 @@ fun McpServersScreen(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+            item { PresetSection(onAdd = { preset, url -> viewModel.addPreset(preset, url) }) }
+            item {
+                Text("Your servers", style = MaterialTheme.typography.titleMedium)
+            }
             items(state.servers, key = { it.id }) { server ->
                 McpServerCard(
                     server = server,
@@ -142,6 +146,66 @@ fun McpServersScreen(
             },
             onDismiss = { viewModel.clearFormError(); editing = null }
         )
+    }
+}
+
+@Composable
+private fun PresetSection(onAdd: (McpPreset, String) -> Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Built-in presets", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Add saves the server turned off. Test it, then flip the switch. GitHub and SearXNG stay as you saved them.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall
+        )
+        McpPresets.all.forEach { preset ->
+            PresetCard(preset = preset, onAdd = { url -> onAdd(preset, url) })
+        }
+    }
+}
+
+@Composable
+private fun PresetCard(preset: McpPreset, onAdd: (String) -> Boolean) {
+    var url by remember(preset.id) { mutableStateOf(preset.defaultUrl) }
+    var showSetup by remember(preset.id) { mutableStateOf(false) }
+    var urlError by remember(preset.id) { mutableStateOf<String?>(null) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(preset.name, style = MaterialTheme.typography.titleMedium)
+            Text(
+                preset.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = url,
+                onValueChange = {
+                    url = it
+                    urlError = null
+                },
+                label = { Text("URL") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (urlError != null) {
+                Text(urlError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            TextButton(onClick = { showSetup = !showSetup }) {
+                Text(if (showSetup) "Hide server setup" else "Server setup")
+            }
+            if (showSetup) {
+                Text(preset.setupHelp, style = MaterialTheme.typography.bodySmall)
+            }
+            Button(
+                onClick = {
+                    if (!onAdd(url)) urlError = "Type a URL first."
+                },
+                modifier = Modifier.align(Alignment.End)
+            ) { Text("Add") }
+        }
     }
 }
 

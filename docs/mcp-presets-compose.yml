@@ -1,0 +1,86 @@
+# PetLlama MCP presets for 4650ge (LAN 192.168.1.250).
+#
+# These three official reference servers speak stdio. Supergateway turns each
+# one into Streamable HTTP at /mcp, stateless (do not add --stateful) and with
+# CORS open, the same shape as the existing SearXNG MCP server. GitHub and
+# SearXNG are not in this file. Leave those containers as they are.
+#
+# Images and packages checked on 2026-11-17:
+#   supercorp/supergateway:4.2.2-uvx   (Docker Hub)
+#   node:24-alpine                     (Docker Hub)
+#   mcp-server-fetch 2026.11.11        (PyPI)
+#   mcp-server-time 2026.11.11         (PyPI)
+#   @modelcontextprotocol/server-filesystem 2.3.0  (npm, needs Node 24)
+#   supergateway 4.2.2                 (npm)
+#
+# From the folder that contains this file:
+#   docker compose -f mcp-presets-compose.yml up -d
+#
+# Then in the PetLlama MCP screen, tap Add on a preset, Test, and flip the switch.
+
+services:
+  fetch:
+    image: supercorp/supergateway:4.2.2-uvx
+    restart: unless-stopped
+    command:
+      - --stdio
+      - uvx mcp-server-fetch==2026.11.11
+      - --outputTransport
+      - streamableHttp
+      - --port
+      - "8000"
+      - --host
+      - 0.0.0.0
+      - --protocolVersion
+      - "2025-06-18"
+      - --cors
+      - --healthEndpoint
+      - /healthz
+    ports:
+      - "8089:8000"
+
+  time:
+    image: supercorp/supergateway:4.2.2-uvx
+    restart: unless-stopped
+    environment:
+      TZ: America/New_York
+    # Alpine in this image has no timezone database. Install it, then start
+    # the gateway. --local-timezone is what mcp-server-time actually reads.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache tzdata
+        exec supergateway \
+          --stdio "uvx mcp-server-time==2026.11.11 --local-timezone=America/New_York" \
+          --outputTransport streamableHttp \
+          --port 8000 \
+          --host 0.0.0.0 \
+          --protocolVersion 2025-06-18 \
+          --cors \
+          --healthEndpoint /healthz
+    ports:
+      - "8090:8000"
+
+  filesystem:
+    image: node:24-alpine
+    restart: unless-stopped
+    # Left side is a folder on 4650ge. Create it, or change the path, before
+    # the first start. :ro keeps Docker from allowing writes.
+    # To make the folder read-write:
+    #   1. Remove :ro from the volume line below.
+    #   2. Remove --read-only from the server command below.
+    volumes:
+      - ${MCP_FILESYSTEM_DIR:-/srv/petllama/files}:/data:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec npx -y supergateway@4.2.2 \
+          --stdio "npx -y @modelcontextprotocol/server-filesystem@2.3.0 --read-only /data" \
+          --outputTransport streamableHttp \
+          --port 8000 \
+          --host 0.0.0.0 \
+          --protocolVersion 2025-06-18 \
+          --cors \
+          --healthEndpoint /healthz
+    ports:
+      - "8091:8000"
