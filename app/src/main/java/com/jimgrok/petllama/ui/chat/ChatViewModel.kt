@@ -19,9 +19,12 @@ import com.jimgrok.petllama.network.Msg
 import com.jimgrok.petllama.network.ToolCatalog
 import com.jimgrok.petllama.network.runToolLoop
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,17 +70,27 @@ class ChatViewModel : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+    /**
+     * Sends are not tied to the screen loader. Cancelling a /props read or
+     * reloading models must not cancel MCP initialize. [stop] applies only
+     * after that handshake, once the model request itself has started.
+     */
+    private val generationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var streamJob: Job? = null
     private var loadJob: Job? = null
+    private var propsJob: Job? = null
     private var nextTempId = -1L
     private val liveSpeed = LiveTokenSpeed()
     private var contextLoadedFor: Long? = null
+    /** Stop is ignored until the model request itself has started. */
+    private var acceptStop = false
 
     fun init(serverId: Long) {
         // The screen calls this again after rotation. The load job stays active
         // for the life of the screen, so don't start a second collector.
         if (loadJob?.isActive == true && _state.value.server?.id == serverId) return
         loadJob?.cancel()
+        propsJob?.cancel()
         loadJob = viewModelScope.launch {
             val server = Db.servers.getById(serverId) ?: return@launch
             _state.update { it.copy(server = server) }
@@ -95,14 +108,24 @@ class ChatViewModel : ViewModel() {
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Failed to load models: ${e.message}") }
             }
-            if (contextLoadedFor != serverId) {
-                val nCtx = runCatching { LlamaClient(server).contextLength() }.getOrNull()
-                contextLoadedFor = serverId
-                if (nCtx != null) _state.update { it.copy(contextSize = nCtx) }
-            }
             Db.conversations.observeAll(serverId).collect { convs ->
                 _state.update { it.copy(conversations = convs) }
             }
+        }
+        // /props can block. It is its own job so cancelling it cannot cancel a send,
+        // and runCatching must not swallow that cancellation into the model loader.
+        propsJob = viewModelScope.launch {
+            if (contextLoadedFor == serverId) return@launch
+            val server = Db.servers.getById(serverId) ?: return@launch
+            val nCtx = try {
+                LlamaClient(server).contextLength()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            contextLoadedFor = serverId
+            if (nCtx != null) _state.update { it.copy(contextSize = nCtx) }
         }
     }
 
@@ -189,7 +212,15 @@ class ChatViewModel : ViewModel() {
     }
 
     fun stop() {
+        // Tool discovery is not the model call. A tap that lands on Stop while
+        // the send button is swapping must not cancel GitHub initialize.
+        if (!acceptStop) return
         streamJob?.cancel()
+    }
+
+    override fun onCleared() {
+        generationScope.cancel()
+        super.onCleared()
     }
 
     private fun tempId(): Long = nextTempId--
@@ -302,7 +333,8 @@ class ChatViewModel : ViewModel() {
             return
         }
 
-        viewModelScope.launch {
+        acceptStop = false
+        streamJob = generationScope.launch {
             val convId = s.activeConversationId ?: withContext(Dispatchers.IO) {
                 val id = Db.conversations.insert(
                     ConversationEntity(serverId = server.id, model = model)
@@ -326,14 +358,14 @@ class ChatViewModel : ViewModel() {
             val sessions = mutableMapOf<Long, McpClient>()
             var toolBubbleId: Long? = null
 
-            streamJob = launch {
-                var error: String? = null
-                try {
-                    GenerationGuard.start()
-                    liveSpeed.reset()
-                    _state.update { it.copy(speedLive = true, tokensPerSecond = null, promptPerSecond = null) }
-                    val catalog = if (s.toolsEnabled) loadCatalog() else null
-                    runToolLoop(
+            var error: String? = null
+            try {
+                liveSpeed.reset()
+                _state.update { it.copy(speedLive = true, tokensPerSecond = null, promptPerSecond = null) }
+                val catalog = if (s.toolsEnabled) loadCatalog() else null
+                acceptStop = true
+                GenerationGuard.start()
+                runToolLoop(
                         llama = client,
                         messages = messages,
                         buildRequest = { msgs, tools ->
@@ -418,6 +450,7 @@ class ChatViewModel : ViewModel() {
                 } catch (e: Exception) {
                     error = e.toUserMessage()
                 } finally {
+                    acceptStop = false
                     sessions.values.forEach { runCatching { it.close() } }
                     GenerationGuard.stop()
                     withContext(NonCancellable) {
@@ -442,7 +475,6 @@ class ChatViewModel : ViewModel() {
                         }
                     }
                 }
-            }
         }
     }
 }

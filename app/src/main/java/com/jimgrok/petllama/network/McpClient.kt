@@ -5,6 +5,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -145,6 +146,8 @@ class McpClient(
             .post(body.toString().toRequestBody(JSON))
         val response = try {
             execute(builder.build())
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: McpException) {
             throw e
         } catch (e: Exception) {
@@ -162,6 +165,8 @@ class McpClient(
             }
             val messages = try {
                 readMessages(resp, id)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: McpException) {
                 throw e
             } catch (e: Exception) {
@@ -198,6 +203,8 @@ class McpClient(
             http.newCall(
                 requestBuilder(server.url.trim()).get().header("Accept", "text/event-stream").build()
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             return
         }
@@ -205,6 +212,9 @@ class McpClient(
         // Headers should come back quickly. A server that ignores GET must not block tools/list.
         val response = try {
             withTimeoutOrNull(2_000) { execute(call) }
+        } catch (e: CancellationException) {
+            cancelAwayFromCaller(call)
+            throw e
         } catch (_: Exception) {
             cancelAwayFromCaller(call)
             return
@@ -362,6 +372,8 @@ private fun readSse(source: BufferedSource, expectId: Int?): List<JsonElement> {
             }
         }
         flush()
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         flush()
         if (expectId != null && found.any { it.matchesId(expectId) }) return found
