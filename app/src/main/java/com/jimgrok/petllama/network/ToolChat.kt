@@ -206,7 +206,7 @@ suspend fun runToolLoop(
                 )
                 exposed == null -> McpCallResult("Unknown tool: ${call.function.name}", isError = true)
                 call.function.arguments.isBlank() -> McpCallResult("No arguments provided.", isError = true)
-                else -> safeCallTool(exposed, arguments)
+                else -> runCatching { callTool(exposed, arguments) }.recoverToolError()
             }
             val text = capToolResult(outcome.text)
             onToolResult(
@@ -234,16 +234,8 @@ suspend fun runToolLoop(
     }
 }
 
-private suspend fun safeCallTool(exposed: ExposedTool, arguments: String): McpCallResult =
-    try {
-        callToolRef!!.invoke(exposed, arguments)
-    } catch (e: kotlinx.coroutines.CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        McpCallResult("Tool error: ${e.explain()}", isError = true)
-    }
-
-private var callToolRef: (suspend (ExposedTool, String) -> McpCallResult)? = null
+private fun Result<McpCallResult>.recoverToolError(): McpCallResult =
+    getOrElse { McpCallResult("Tool error: ${it.explain()}", isError = true) }
 
 private class PartialCall(
     val id: String = "",
