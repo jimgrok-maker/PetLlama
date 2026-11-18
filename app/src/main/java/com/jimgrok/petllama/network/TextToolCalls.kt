@@ -45,22 +45,19 @@ internal fun splitTextToolCalls(text: String): SplitText {
 }
 
 private fun parseBlockInner(inner: String, truncated: Boolean): TextToolCall? {
-    val name = if (!truncated) BLOCK_NAME.find(inner)?.value else null
-    val argsMatch = if (!truncated) BLOCK_ARGS.find(inner) else null
-    var name2 = name?.let { it.removePrefix("<name>").removeSuffix("</name>").trim() }
-    var args = argsMatch?.value
+    var name: String? = if (!truncated) BLOCK_NAME.find(inner)?.value else null
+    var args = if (!truncated) BLOCK_ARGS.find(inner)?.value
         ?.removePrefix("<arguments>")
         ?.removeSuffix("</arguments>")
         ?.trim()
-        .orEmpty()
+        .orEmpty() else ""
     if (name.isNullOrBlank()) {
-        val open = OPEN_NAME.find(inner)
-        if (open == null) return null
-        name2 = open.groupValues[1].trim()
+        val open = OPEN_NAME.find(inner) ?: return null
+        name = open.groupValues[1].trim()
         args = OPEN_ARGS.find(inner)?.groupValues[1]?.trim().orEmpty()
     }
-    if (name2.isNullOrBlank()) return null
-    return TextToolCall(name2, args, truncated)
+    if (name.isBlank()) return null
+    return TextToolCall(name, args, truncated)
 }
 
 /**
@@ -72,17 +69,16 @@ private fun parseBlockInner(inner: String, truncated: Boolean): TextToolCall? {
 internal fun repairToolArguments(raw: String): String? {
     val text = raw.trim()
     if (text.isEmpty()) return "{}"
-    JsonParser.parseString(text).takeIf { it.isJsonObject }?.let { return text }
+    runCatching { JsonParser.parseString(text) }.getOrNull()
+        ?.takeIf { it.isJsonObject }?.let { return text }
     var fixed = text
     if (!fixed.endsWith('}')) fixed += "}"
     fixed = Regex(",\\s*\\}\\s*\\z").replace(fixed, "}")
-    return try {
-        JsonParser.parseString(fixed)
-        if (!fixed.trimEnd().endsWith("}")) null else fixed
-    } catch (_: Exception) {
-        null
-    }
+    return if (isValidJsonArgs(fixed)) fixed else null
 }
+
+internal fun isValidJsonArgs(text: String): Boolean =
+    runCatching { JsonParser.parseString(text) }.getOrNull()?.isJsonObject == true
 
 /** True when [obj] has an object-typed "properties" member (an inputSchema, not the arguments themselves). */
 internal fun looksLikeInputSchema(obj: JsonObject): Boolean {
