@@ -1,7 +1,5 @@
 package com.jimgrok.petllama.network
 
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
 
 /** A tool the model is allowed to call, with a name that is unique across servers. */
@@ -55,7 +53,7 @@ data class ToolCatalog(val tools: List<ExposedTool>) {
 
 /** OpenAI function names are safest at 64 characters of letters, digits, _ and -. */
 internal fun exposeName(serverId: Long, toolName: String): String {
-    val safe = toolName.replace(Regex("[^A-Za-z09_-]"), "_")
+    val safe = toolName.replace(Regex("[^A-Za-z0-9_-]"), "_")
     val prefix = "s${serverId}_"
     val combined = prefix + safe
     return if (combined.length <= 64) combined else prefix + safe.takeLast(64 - prefix.length)
@@ -151,7 +149,7 @@ suspend fun runToolLoop(
         // deciding this round produced no calls.
         val textCalls = splitTextToolCalls(roundText.toString())
         for (tc in textCalls.calls) {
-            partials[partials.size] = PartialCall(tc.id(), tc.name, tc.arguments)
+            partials[partials.size] = PartialCall("", tc.name, tc.arguments, tc.truncated)
         }
         val calls = partials.values.filter { it.name.isNotBlank() }
         onRoundDone()
@@ -180,7 +178,11 @@ suspend fun runToolLoop(
         val toolCalls = calls.mapIndexed { index, partial ->
             ToolCall(
                 id = partial.id.ifBlank { "call_${toolRounds}_$index" },
-                function = ToolCallFunction(partial.name, partial.arguments.toString().ifBlank { "{}" })
+                function = ToolCallFunction(
+                    partial.name,
+                    if (partial.truncated) partial.arguments.toString()
+                    else partial.arguments.toString().ifBlank { "{}" }
+                )
             )
         }
         messages += Msg(
@@ -188,18 +190,23 @@ suspend fun runToolLoop(
             content = textCalls.answer.ifBlank { null },
             toolCalls = toolCalls
         )
-        for (call in toolCalls) {
+        for ((index, call) in toolCalls.withIndex()) {
+            val partial = calls[index]
             val exposed = catalog?.find(call.function.name)
             val arguments = call.function.arguments
             val labelServer = exposed?.server?.name ?: "MCP"
             val labelTool = exposed?.tool?.name ?: call.function.name
             onToolStart(labelServer, labelTool, arguments)
-            val outcome = if (exposed == null) {
-                McpCallResult("Unknown tool: ${call.function.name}", isError = true)
-            } else if (call.function.arguments.isBlank()) {
-                McpCallResult("No arguments provided.", isError = true)
-            } else {
-                runCatching { callTool(exposed, arguments) }.recoverToolError()
+            val outcome = when {
+                // The model ran out of output mid-block: the arguments are not
+                // a complete JSON object, so do not run them.
+                partial.truncated -> McpCallResult(
+                    "Tool call was cut off before its arguments finished. Continue to complete it.",
+                    isError = true
+                )
+                exposed == null -> McpCallResult("Unknown tool: ${call.function.name}", isError = true)
+                call.function.arguments.isBlank() -> McpCallResult("No arguments provided.", isError = true)
+                else -> safeCallTool(exposed, arguments)
             }
             val text = capToolResult(outcome.text)
             onToolResult(
@@ -227,24 +234,23 @@ suspend fun runToolLoop(
     }
 }
 
-private fun PartialCall.id(): String = ""
-
-private fun runCatchingResult(block: () -> McpCallResult).recoverToolError(): McpCallResult =
+private suspend fun safeCallTool(exposed: ExposedTool, arguments: String): McpCallResult =
     try {
-        block()
+        callToolRef!!.invoke(exposed, arguments)
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (e: Exception) {
         McpCallResult("Tool error: ${e.explain()}", isError = true)
     }
 
+private var callToolRef: (suspend (ExposedTool, String) -> McpCallResult)? = null
+
 private class PartialCall(
     val id: String = "",
     val name: String = "",
-    val arguments: StringBuilder = StringBuilder()
-) {
-    constructor(call: TextToolCall) : this("", call.name, StringBuilder(call.arguments))
-}
+    val arguments: StringBuilder = StringBuilder(),
+    val truncated: Boolean = false
+)
 
 internal fun capToolResult(text: String): String {
     if (text.length <= MAX_TOOL_RESULT_CHARS) return text
