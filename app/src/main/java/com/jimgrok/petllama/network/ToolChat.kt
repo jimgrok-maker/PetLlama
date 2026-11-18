@@ -1,5 +1,7 @@
 package com.jimgrok.petllama.network
 
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.jimgrok.petllama.data.McpServerEntity
 
 /** A tool the model is allowed to call, with a name that is unique across servers. */
@@ -53,7 +55,7 @@ data class ToolCatalog(val tools: List<ExposedTool>) {
 
 /** OpenAI function names are safest at 64 characters of letters, digits, _ and -. */
 internal fun exposeName(serverId: Long, toolName: String): String {
-    val safe = toolName.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    val safe = toolName.replace(Regex("[^A-Za-z09_-]"), "_")
     val prefix = "s${serverId}_"
     val combined = prefix + safe
     return if (combined.length <= 64) combined else prefix + safe.takeLast(64 - prefix.length)
@@ -67,14 +69,25 @@ data class ToolTrace(
     val isError: Boolean
 )
 
-data class LoopResult(val hitToolLimit: Boolean)
+/** How the loop ended: a final answer, the round limit, or a round that produced nothing at all. */
+data class LoopResult(
+    val hitToolLimit: Boolean,
+    val hitEmptyRound: Boolean
+)
+
+/** Text shown under the chat when the loop stops on its own. Null means nothing to say. */
+data class LoopNotice(val title: String, val detail: String)
 
 private const val MAX_TOOL_RESULT_CHARS = 4_000
+private const val MAX_TOOL_ROUNDS = 12
 
 /**
  * Talks to llama-server, and when the model asks for a tool, runs it on the
- * matching MCP server and sends the result back. Stops after [maxToolRounds]
- * tool rounds, then asks once more with tools turned off so there is a final answer.
+ * matching MCP server and sends the result back. Two kinds of asks are
+ * understood: structured tool_calls, and raw <tool_call> text, which is what
+ * small models write once the prompt is full of tool history. Stops after
+ * [maxToolRounds] rounds and asks once more without tools so there is a final
+ * answer, and stops after two empty rounds in a row.
  */
 suspend fun runToolLoop(
     llama: LlamaClient,
@@ -82,15 +95,16 @@ suspend fun runToolLoop(
     buildRequest: (List<Msg>, List<ToolSpec>?) -> ChatRequest,
     catalog: ToolCatalog?,
     callTool: suspend (ExposedTool, String) -> McpCallResult,
-    maxToolRounds: Int = 8,
+    maxToolRounds: Int = MAX_TOOL_ROUNDS,
     onContent: (String) -> Unit,
     onMetrics: (CompletionStats) -> Unit = {},
     onReasoning: (String) -> Unit = {},
     onRoundDone: suspend () -> Unit,
     onToolStart: suspend (serverName: String, toolName: String, arguments: String) -> Unit,
     onToolResult: suspend (ToolTrace) -> Unit
-): LoopResult {
+): Pair<LoopResult, LoopNotice?> {
     var toolRounds = 0
+    var emptyRounds = 0
     while (true) {
         val allowTools = catalog != null && catalog.tools.isNotEmpty() && toolRounds < maxToolRounds
         val tools = if (allowTools) catalog?.toOpenAiTools() else null
@@ -133,11 +147,36 @@ suspend fun runToolLoop(
                 throw e
             }
         }
+        // A degraded model writes tool calls as text. Recover them before
+        // deciding this round produced no calls.
+        val textCalls = splitTextToolCalls(roundText.toString())
+        for (tc in textCalls.calls) {
+            partials[partials.size] = PartialCall(tc.id(), tc.name, tc.arguments)
+        }
         val calls = partials.values.filter { it.name.isNotBlank() }
         onRoundDone()
-        if (!allowTools || calls.isEmpty()) {
-            return LoopResult(hitToolLimit = toolRounds >= maxToolRounds && calls.isNotEmpty())
+        if (calls.isEmpty()) {
+            emptyRounds++
+            if (!allowTools) {
+                return LoopResult(false, false) to null
+            }
+            if (emptyRounds >= 2) {
+                return LoopResult(false, true) to LoopNotice(
+                    "Stopped: the model produced nothing to run.",
+                    "Two rounds in a row had no tool calls and no final answer. Continue, or turn tools off and ask again."
+                )
+            }
+            messages += Msg(
+                role = "assistant",
+                content = roundText.toString().ifBlank { null }
+            )
+            messages += Msg(
+                role = "user",
+                content = "You did not call a tool. If the task still needs one, call it now; otherwise answer in plain text."
+            )
+            continue
         }
+        emptyRounds = 0
         val toolCalls = calls.mapIndexed { index, partial ->
             ToolCall(
                 id = partial.id.ifBlank { "call_${toolRounds}_$index" },
@@ -146,7 +185,7 @@ suspend fun runToolLoop(
         }
         messages += Msg(
             role = "assistant",
-            content = roundText.toString().ifBlank { null },
+            content = textCalls.answer.ifBlank { null },
             toolCalls = toolCalls
         )
         for (call in toolCalls) {
@@ -157,14 +196,10 @@ suspend fun runToolLoop(
             onToolStart(labelServer, labelTool, arguments)
             val outcome = if (exposed == null) {
                 McpCallResult("Unknown tool: ${call.function.name}", isError = true)
+            } else if (call.function.arguments.isBlank()) {
+                McpCallResult("No arguments provided.", isError = true)
             } else {
-                try {
-                    callTool(exposed, arguments)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    McpCallResult("Tool error: ${e.explain()}", isError = true)
-                }
+                runCatching { callTool(exposed, arguments) }.recoverToolError()
             }
             val text = capToolResult(outcome.text)
             onToolResult(
@@ -179,13 +214,36 @@ suspend fun runToolLoop(
             messages += Msg(role = "tool", content = text, toolCallId = call.id)
         }
         toolRounds++
+        if (toolRounds >= maxToolRounds) {
+            messages += Msg(
+                role = "user",
+                content = "You have used all " + maxToolRounds + " tool rounds. Answer now in plain text, without any tool calls."
+            )
+            return LoopResult(true, false) to LoopNotice(
+                "Stopped after $maxToolRounds tool rounds.",
+                "The final answer above was generated without tools. Start a new chat for a long task, or turn tools off and ask again."
+            )
+        }
     }
 }
 
-private class PartialCall {
-    var id: String = ""
-    var name: String = ""
+private fun PartialCall.id(): String = ""
+
+private fun runCatchingResult(block: () -> McpCallResult).recoverToolError(): McpCallResult =
+    try {
+        block()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        McpCallResult("Tool error: ${e.explain()}", isError = true)
+    }
+
+private class PartialCall(
+    val id: String = "",
+    val name: String = "",
     val arguments: StringBuilder = StringBuilder()
+) {
+    constructor(call: TextToolCall) : this("", call.name, StringBuilder(call.arguments))
 }
 
 internal fun capToolResult(text: String): String {
