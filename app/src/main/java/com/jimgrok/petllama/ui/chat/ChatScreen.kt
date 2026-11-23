@@ -213,6 +213,13 @@ fun ChatScreen(
                     TextButton(onClick = { vm.clearError() }) { Text("dismiss") }
                 }
             }
+            state.toolNotice?.let { notice ->
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(notice, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, maxLines = 4)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { vm.clearToolNotice() }) { Text("dismiss") }
+                }
+            }
 
             // messages
             if (state.messages.isEmpty()) {
@@ -261,10 +268,12 @@ fun ChatScreen(
             temperature = state.temperature,
             topP = state.topP,
             maxTokens = state.maxTokens,
+            maxToolCalls = state.maxToolCalls,
             systemPrompt = state.systemPrompt,
             onTemperature = vm::setTemperature,
             onTopP = vm::setTopP,
             onMaxTokens = vm::setMaxTokens,
+            onMaxToolCalls = vm::setMaxToolCalls,
             onSystemPrompt = vm::setSystemPrompt,
             onDismiss = { showParams = false }
         )
@@ -567,16 +576,19 @@ fun ParamsSheet(
     temperature: Float,
     topP: Float,
     maxTokens: Int,
+    maxToolCalls: Int,
     systemPrompt: String,
     onTemperature: (Float) -> Unit,
     onTopP: (Float) -> Unit,
     onMaxTokens: (Int) -> Unit,
+    onMaxToolCalls: (Int) -> Unit,
     onSystemPrompt: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var temp by remember { mutableStateOf(temperature) }
     var top by remember { mutableStateOf(topP) }
     var maxTok by remember { mutableStateOf(maxTokens) }
+    var maxTools by remember { mutableStateOf(maxToolCalls) }
     var sys by remember { mutableStateOf(systemPrompt) }
 
     val sheetState = androidx.compose.material3.rememberModalBottomSheetState()
@@ -595,12 +607,17 @@ fun ParamsSheet(
             OutlinedTextField(value = maxTok.toString(), onValueChange = { maxTok = it.toIntOrNull() ?: maxTok },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
 
+            Text("Max tool calls (default 25)", style = MaterialTheme.typography.bodyMedium)
+            OutlinedTextField(value = maxTools.toString(), onValueChange = { maxTools = it.toIntOrNull() ?: maxTools },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+
             Text("System prompt", style = MaterialTheme.typography.bodyMedium)
             OutlinedTextField(value = sys, onValueChange = { sys = it },
                 modifier = Modifier.fillMaxWidth().height(120.dp))
 
             androidx.compose.material3.Button(onClick = {
-                onTemperature(temp); onTopP(top); onMaxTokens(maxTok); onSystemPrompt(sys)
+                onTemperature(temp); onTopP(top); onMaxTokens(maxTok)
+                onMaxToolCalls(maxTools); onSystemPrompt(sys)
                 onDismiss()
             }, modifier = Modifier.fillMaxWidth()) { Text("Apply") }
         }

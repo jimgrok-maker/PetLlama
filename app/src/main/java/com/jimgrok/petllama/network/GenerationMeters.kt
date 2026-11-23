@@ -107,14 +107,25 @@ fun formatSpeed(tokensPerSecond: Double): String {
 }
 
 private fun usedTokens(timings: JsonObject?, usage: JsonObject?): Int? {
-    timings?.intOrNull("cache_n")?.let { if (it >= 0) return it }
-    val prompt = timings?.intOrNull("prompt_n")
-    val predicted = timings?.intOrNull("predicted_n")
-    if (prompt != null || predicted != null) return (prompt ?: 0) + (predicted ?: 0)
+    if (timings != null) {
+        val cache = timings.intOrNull("cache_n")?.takeIf { it >= 0 }
+        val prompt = timings.intOrNull("prompt_n")?.takeIf { it >= 0 }
+        val predicted = timings.intOrNull("predicted_n")?.takeIf { it >= 0 }
+        // Occupied context is cached prompt + prompt processed this request +
+        // tokens just generated. A streamed chunk often sends cache_n: 0 before
+        // the real counts, which used to paint the bar as 0%.
+        if (cache != null || prompt != null || predicted != null) {
+            val sum = (cache ?: 0) + (prompt ?: 0) + (predicted ?: 0)
+            if (sum > 0) return sum
+        }
+    }
     val promptTokens = usage?.intOrNull("prompt_tokens")
     val completion = usage?.intOrNull("completion_tokens")
-    if (promptTokens != null || completion != null) return (promptTokens ?: 0) + (completion ?: 0)
-    return usage?.intOrNull("total_tokens")
+    if (promptTokens != null || completion != null) {
+        val sum = (promptTokens ?: 0) + (completion ?: 0)
+        if (sum > 0) return sum
+    }
+    return usage?.intOrNull("total_tokens")?.takeIf { it > 0 }
 }
 
 private fun JsonObject.getObject(name: String): JsonObject? {

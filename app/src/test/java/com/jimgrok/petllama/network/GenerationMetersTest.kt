@@ -8,7 +8,7 @@ import org.junit.Test
 class GenerationMetersTest {
 
     @Test
-    fun timingsPreferCacheSizeAndReportBothSpeeds() {
+    fun timingsAddCachePromptAndPredicted() {
         val stats = parseCompletionStats(
             """
             {"choices":[{"finish_reason":"stop","delta":{}}],
@@ -18,7 +18,20 @@ class GenerationMetersTest {
         )!!
         assertEquals(48.2, stats.predictedPerSecond!!, 0.01)
         assertEquals(310.5, stats.promptPerSecond!!, 0.01)
-        assertEquals(12300, stats.usedTokens)
+        assertEquals(20500, stats.usedTokens)
+    }
+
+    @Test
+    fun zeroCacheDoesNotHideTheRestOfTheContext() {
+        val stats = parseCompletionStats(
+            """{"timings":{"cache_n":0,"prompt_n":1400,"predicted_n":80,"predicted_per_second":59.8,"prompt_per_second":689}}"""
+        )!!
+        assertEquals(1480, stats.usedTokens)
+        assertEquals(59.8, stats.predictedPerSecond!!, 0.01)
+        val placeholder = parseCompletionStats(
+            """{"timings":{"cache_n":0,"predicted_per_second":59.8,"prompt_per_second":689}}"""
+        )!!
+        assertNull(placeholder.usedTokens)
     }
 
     @Test

@@ -227,7 +227,7 @@ class ToolChatTest {
                 buildRequest = { msgs, tools -> ChatRequest(model = "m", messages = msgs, tools = tools) },
                 catalog = catalog,
                 callTool = { exposed, args -> McpClient(exposed.server).callTool(exposed.tool.name, args) },
-                maxToolRounds = 1,
+                maxToolCalls = 1,
                 onContent = { text.append(it) },
                 onRoundDone = {},
                 onToolStart = { _, _, _ -> },
@@ -274,6 +274,62 @@ class ToolChatTest {
             )
             assertEquals("still here", text.toString())
             assertEquals(2, calls)
+        } finally {
+            llama.shutdown()
+        }
+    }
+
+    @Test
+    fun toolCallHiddenInReasoningIsRunAndStripped() = runBlocking {
+        val llama = MockWebServer()
+        var round = 0
+        val xml = "<tool_call> <function=s2_get_file_contents> <parameter=owner> jimgrok-maker <parameter=repo> PetLlama <parameter=path> app/src/main <parameter=sha> 3a9dc79b617d <parameter=fields> [\"name\",\"type\",\"path\"] </tool_call>"
+        llama.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                round++
+                val sse = if (round == 1) {
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":${com.google.gson.Gson().toJson(xml)}}}]}\n\ndata: [DONE]\n\n"
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Reviewed.\"}}]}\n\ndata: [DONE]\n\n"
+                }
+                return MockResponse().setBody(sse)
+            }
+        }
+        llama.start()
+        try {
+            val schema = com.google.gson.JsonParser.parseString(
+                """{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"path":{"type":"string"},"ref":{"type":"string"}}}"""
+            ).asJsonObject
+            val server = McpServerEntity(id = 2, name = "github", url = "https://example/mcp")
+            val catalog = ToolCatalog.from(
+                listOf(server to listOf(McpTool("get_file_contents", "read", schema)))
+            )
+            val seen = mutableListOf<String>()
+            var revisedThinking: String? = null
+            val result = runToolLoop(
+                llama = LlamaClient(ServerEntity(name = "llama", url = llama.url("/").toString().trimEnd('/'))),
+                messages = mutableListOf(Msg("user", "review the petllama github repo")),
+                buildRequest = { msgs, tools -> ChatRequest(model = "m", messages = msgs, tools = tools) },
+                catalog = catalog,
+                callTool = { _, args ->
+                    seen += args
+                    McpCallResult("file", isError = false)
+                },
+                onContent = {},
+                onReasoning = {},
+                onReasoningRevised = { revisedThinking = it },
+                onRoundDone = {},
+                onToolStart = { _, _, _ -> },
+                onToolResult = {}
+            )
+            assertEquals(1, seen.size)
+            val args = com.google.gson.JsonParser.parseString(seen.single()).asJsonObject
+            assertEquals("3a9dc79b617d", args.get("ref").asString)
+            assertEquals("app/src/main", args.get("path").asString)
+            assertFalse(args.has("sha"))
+            assertFalse(args.has("fields"))
+            assertEquals("", revisedThinking)
+            assertFalse(result.hitToolLimit)
         } finally {
             llama.shutdown()
         }

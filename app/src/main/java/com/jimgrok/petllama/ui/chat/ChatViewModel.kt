@@ -9,6 +9,7 @@ import com.jimgrok.petllama.data.ServerEntity
 import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.CompletionStats
+import com.jimgrok.petllama.network.DEFAULT_MAX_TOOL_CALLS
 import com.jimgrok.petllama.network.ExposedTool
 import com.jimgrok.petllama.network.LiveTokenSpeed
 import com.jimgrok.petllama.network.LlamaClient
@@ -58,6 +59,7 @@ class ChatViewModel : ViewModel() {
         val temperature: Float = 0.7f,
         val topP: Float = 0.95f,
         val maxTokens: Int = 512,
+        val maxToolCalls: Int = DEFAULT_MAX_TOOL_CALLS,
         val systemPrompt: String = "",
         /** When on, enabled MCP servers are offered to the model for this chat. */
         val toolsEnabled: Boolean = true,
@@ -65,7 +67,9 @@ class ChatViewModel : ViewModel() {
         val promptPerSecond: Double? = null,
         val speedLive: Boolean = false,
         val usedTokens: Int? = null,
-        val contextSize: Int? = null
+        val contextSize: Int? = null,
+        /** Shown when a reply stops because it used the tool-call limit. */
+        val toolNotice: String? = null
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -176,6 +180,8 @@ class ChatViewModel : ViewModel() {
     fun setTemperature(v: Float) = _state.update { it.copy(temperature = v) }
     fun setTopP(v: Float) = _state.update { it.copy(topP = v) }
     fun setMaxTokens(v: Int) = _state.update { it.copy(maxTokens = v) }
+    fun setMaxToolCalls(v: Int) = _state.update { it.copy(maxToolCalls = v.coerceIn(1, 100)) }
+    fun clearToolNotice() = _state.update { it.copy(toolNotice = null) }
     fun setSystemPrompt(v: String) = _state.update { it.copy(systemPrompt = v) }
     fun setToolsEnabled(enabled: Boolean) = _state.update { it.copy(toolsEnabled = enabled) }
     fun clearError() = _state.update { it.copy(error = null) }
@@ -233,7 +239,8 @@ class ChatViewModel : ViewModel() {
             st.copy(
                 tokensPerSecond = stats.predictedPerSecond ?: st.tokensPerSecond,
                 promptPerSecond = stats.promptPerSecond ?: st.promptPerSecond,
-                usedTokens = stats.usedTokens ?: st.usedTokens,
+                // Ignore a streamed 0 so it cannot wipe a real fill from this turn.
+                usedTokens = stats.usedTokens?.takeIf { it > 0 } ?: st.usedTokens,
                 speedLive = stats.predictedPerSecond == null
             )
         }
@@ -255,7 +262,7 @@ class ChatViewModel : ViewModel() {
     private suspend fun finishAssistantBubble(convId: Long) {
         val streaming = _state.value.messages.lastOrNull { it.isStreaming && it.role == "assistant" }
             ?: return
-        if (streaming.content.isBlank()) {
+        if (streaming.content.isBlank() && streaming.reasoning.isNullOrBlank()) {
             _state.update { st -> st.copy(messages = st.messages.filterNot { it.id == streaming.id }) }
             return
         }
@@ -284,6 +291,24 @@ class ChatViewModel : ViewModel() {
                     msg
                 }
             })
+        }
+    }
+
+    private fun replaceAssistantContent(text: String) {
+        _state.update { st ->
+            val list = st.messages.toMutableList()
+            val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
+            if (idx >= 0) list[idx] = list[idx].copy(content = text)
+            st.copy(messages = list)
+        }
+    }
+
+    private fun replaceAssistantReasoning(text: String) {
+        _state.update { st ->
+            val list = st.messages.toMutableList()
+            val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
+            if (idx >= 0) list[idx] = list[idx].copy(reasoning = text.ifBlank { null })
+            st.copy(messages = list)
         }
     }
 
@@ -347,10 +372,15 @@ class ChatViewModel : ViewModel() {
                 val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
                 val mid = persistMessage(userMsg)
                 _state.update { st ->
-                    st.copy(messages = st.messages + UiMessage(mid, "user", text), streaming = true, error = null)
+                    st.copy(
+                        messages = st.messages + UiMessage(mid, "user", text),
+                        streaming = true,
+                        error = null,
+                        toolNotice = null
+                    )
                 }
             } else {
-                _state.update { it.copy(streaming = true, error = null) }
+                _state.update { it.copy(streaming = true, error = null, toolNotice = null) }
             }
 
             val messages = outgoingMessages(_state.value.messages, s.systemPrompt).toMutableList()
@@ -365,7 +395,7 @@ class ChatViewModel : ViewModel() {
                 val catalog = if (s.toolsEnabled) loadCatalog() else null
                 acceptStop = true
                 GenerationGuard.start()
-                runToolLoop(
+                val loop = runToolLoop(
                         llama = client,
                         messages = messages,
                         buildRequest = { msgs, tools ->
@@ -379,6 +409,7 @@ class ChatViewModel : ViewModel() {
                                 tools = tools
                             )
                         },
+                        maxToolCalls = s.maxToolCalls,
                         catalog = catalog,
                         callTool = { exposed: ExposedTool, args: String ->
                             val mcp = sessions.getOrPut(exposed.server.id) { McpClient(exposed.server) }
@@ -393,8 +424,10 @@ class ChatViewModel : ViewModel() {
                                 }
                             }
                         },
+                        onContentRevised = { text -> replaceAssistantContent(text) },
                         onMetrics = { stats -> applyServerStats(stats) },
                         onReasoning = { chunk -> appendReasoning(chunk) },
+                        onReasoningRevised = { text -> replaceAssistantReasoning(text) },
                         onRoundDone = {
                             finishAssistantBubble(convId)
                             liveSpeed.reset()
@@ -445,6 +478,14 @@ class ChatViewModel : ViewModel() {
                             toolBubbleId = null
                         }
                     )
+                if (loop.hitToolLimit) {
+                    val cap = s.maxToolCalls.coerceIn(1, 100)
+                    _state.update {
+                        it.copy(
+                            toolNotice = "Stopped after $cap tool calls. Open chat settings and raise Max tool calls if it should keep going."
+                        )
+                    }
+                }
                 } catch (e: CancellationException) {
                     // stop pressed — keep partial text and finished tool bubbles
                 } catch (e: Exception) {
