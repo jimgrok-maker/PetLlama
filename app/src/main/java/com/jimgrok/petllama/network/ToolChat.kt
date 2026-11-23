@@ -69,12 +69,17 @@ data class ToolTrace(
 
 data class LoopResult(val hitToolLimit: Boolean)
 
+/** How many tool calls one reply may run before it stops and says so. */
+internal const val DEFAULT_MAX_TOOL_CALLS = 25
+
 private const val MAX_TOOL_RESULT_CHARS = 4_000
 
 /**
  * Talks to llama-server, and when the model asks for a tool, runs it on the
- * matching MCP server and sends the result back. Stops after [maxToolRounds]
- * tool rounds, then asks once more with tools turned off so there is a final answer.
+ * matching MCP server and sends the result back. Stops after [maxToolCalls]
+ * tool calls, then asks once more with tools turned off so there is a final answer.
+ * If the server does not parse Qwen's `<tool_call>` XML, those blocks are read
+ * from the answer, or from reasoning when the answer is empty, and run as calls.
  */
 suspend fun runToolLoop(
     llama: LlamaClient,
@@ -82,23 +87,29 @@ suspend fun runToolLoop(
     buildRequest: (List<Msg>, List<ToolSpec>?) -> ChatRequest,
     catalog: ToolCatalog?,
     callTool: suspend (ExposedTool, String) -> McpCallResult,
-    maxToolRounds: Int = 8,
+    maxToolCalls: Int = DEFAULT_MAX_TOOL_CALLS,
     onContent: (String) -> Unit,
+    onContentRevised: (String) -> Unit = {},
     onMetrics: (CompletionStats) -> Unit = {},
     onReasoning: (String) -> Unit = {},
+    onReasoningRevised: (String) -> Unit = {},
     onRoundDone: suspend () -> Unit,
     onToolStart: suspend (serverName: String, toolName: String, arguments: String) -> Unit,
     onToolResult: suspend (ToolTrace) -> Unit
 ): LoopResult {
-    var toolRounds = 0
+    val limit = maxToolCalls.coerceAtLeast(1)
+    var executed = 0
     while (true) {
-        val allowTools = catalog != null && catalog.tools.isNotEmpty() && toolRounds < maxToolRounds
-        val tools = if (allowTools) catalog?.toOpenAiTools() else null
+        val toolsAvailable = catalog != null && catalog.tools.isNotEmpty()
+        val underLimit = toolsAvailable && executed < limit
+        val tools = if (underLimit) catalog?.toOpenAiTools() else null
         val roundText = StringBuilder()
+        val roundReasoning = StringBuilder()
         val partials = sortedMapOf<Int, PartialCall>()
         var attempt = 0
         while (true) {
             roundText.clear()
+            roundReasoning.clear()
             partials.clear()
             var events = 0
             try {
@@ -110,7 +121,10 @@ suspend fun runToolLoop(
                             onContent(event.text)
                         }
                         is StreamEvent.Metrics -> onMetrics(event.stats)
-                        is StreamEvent.Reasoning -> onReasoning(event.text)
+                        is StreamEvent.Reasoning -> {
+                            roundReasoning.append(event.text)
+                            onReasoning(event.text)
+                        }
                         is StreamEvent.ToolDelta -> {
                             val partial = partials.getOrPut(event.index) { PartialCall() }
                             if (!event.id.isNullOrEmpty()) partial.id = event.id
@@ -133,25 +147,51 @@ suspend fun runToolLoop(
                 throw e
             }
         }
-        val calls = partials.values.filter { it.name.isNotBlank() }
-        onRoundDone()
-        if (!allowTools || calls.isEmpty()) {
-            return LoopResult(hitToolLimit = toolRounds >= maxToolRounds && calls.isNotEmpty())
+        val structured = partials.values.filter { it.name.isNotBlank() }
+        var visible = roundText.toString()
+        var thinking = roundReasoning.toString()
+        val recovered = if (structured.isEmpty() && toolsAvailable) {
+            recoverLooseCalls(visible, thinking)
+        } else {
+            null
         }
-        val toolCalls = calls.mapIndexed { index, partial ->
+        if (recovered != null && recovered.calls.isNotEmpty()) {
+            visible = recovered.answer
+            thinking = recovered.reasoning
+            onContentRevised(visible)
+            onReasoningRevised(thinking)
+        }
+        val pending = when {
+            structured.isNotEmpty() && underLimit -> structured.map {
+                PendingCall(it.id, it.name, it.arguments.toString().ifBlank { "{}" })
+            }
+            recovered != null && recovered.calls.isNotEmpty() && underLimit -> recovered.calls.mapIndexed { index, call ->
+                PendingCall("xml_${executed}_$index", call.name, call.arguments.ifBlank { "{}" })
+            }
+            else -> emptyList()
+        }
+        onRoundDone()
+        if (pending.isEmpty()) {
+            return LoopResult(hitToolLimit = !underLimit && toolsAvailable && executed > 0)
+        }
+        val batch = pending.take((limit - executed).coerceAtLeast(0))
+        if (batch.isEmpty()) {
+            return LoopResult(hitToolLimit = true)
+        }
+        val toolCalls = batch.mapIndexed { index, call ->
             ToolCall(
-                id = partial.id.ifBlank { "call_${toolRounds}_$index" },
-                function = ToolCallFunction(partial.name, partial.arguments.toString().ifBlank { "{}" })
+                id = call.id.ifBlank { "call_${executed}_$index" },
+                function = ToolCallFunction(call.name, call.arguments)
             )
         }
         messages += Msg(
             role = "assistant",
-            content = roundText.toString().ifBlank { null },
+            content = visible.ifBlank { null },
             toolCalls = toolCalls
         )
         for (call in toolCalls) {
-            val exposed = catalog?.find(call.function.name)
-            val arguments = call.function.arguments
+            val exposed = catalog?.findLoose(call.function.name)
+            val arguments = if (exposed == null) call.function.arguments else fitArguments(exposed.tool, call.function.arguments)
             val labelServer = exposed?.server?.name ?: "MCP"
             val labelTool = exposed?.tool?.name ?: call.function.name
             onToolStart(labelServer, labelTool, arguments)
@@ -178,9 +218,15 @@ suspend fun runToolLoop(
             )
             messages += Msg(role = "tool", content = text, toolCallId = call.id)
         }
-        toolRounds++
+        executed += batch.size
     }
 }
+
+private data class PendingCall(
+    val id: String,
+    val name: String,
+    val arguments: String
+)
 
 private class PartialCall {
     var id: String = ""
