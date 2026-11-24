@@ -5,7 +5,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [ServerEntity::class, ConversationEntity::class, MessageEntity::class, McpServerEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class PetLlamaDatabase : RoomDatabase() {

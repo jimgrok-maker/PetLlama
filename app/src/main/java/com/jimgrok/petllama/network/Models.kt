@@ -7,7 +7,9 @@ import com.google.gson.annotations.SerializedName
 /** A model entry returned by /v1/models */
 data class ModelInfo(
     @SerializedName("id") val id: String,
-    @SerializedName("name") val name: String = id
+    @SerializedName("name") val name: String = id,
+    /** Context window reported by /v1/models, when the backend sends one. */
+    val contextLength: Int? = null
 )
 
 data class ModelListResponse(

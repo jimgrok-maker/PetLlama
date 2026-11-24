@@ -84,14 +84,14 @@ class LlamaClient(private val server: ServerEntity) {
                     }
                     val body = resp.body?.string().orEmpty()
                     val parsed = try {
-                        GsonHolder.gson.fromJson(body, ModelListResponse::class.java)
+                        modelsFromJson(body)
                     } catch (e: Exception) {
                         cont.resumeIfActiveWith(
                             Result.failure(RuntimeException("Could not read model list: ${e.message}"))
                         )
                         return@use
                     }
-                    cont.resumeIfActive(parsed?.data.orEmpty())
+                    cont.resumeIfActive(parsed)
                 }
             }
         })
@@ -170,10 +170,18 @@ class LlamaClient(private val server: ServerEntity) {
     }
 
     /**
-     * Context length from llama-server. Tries /props, then /slots.
-     * Missing or broken endpoints return null so the meter can hide itself.
+     * Context window for the meter. llama-server answers /props then /slots.
+     * NInfer and vLLM leave those empty and put max_model_len on /v1/models.
+     * [modelId] picks that model's length when the list has more than one.
      */
-    suspend fun contextLength(): Int? = withContext(Dispatchers.IO) {
+    suspend fun contextLength(modelId: String? = null): Int? = withContext(Dispatchers.IO) {
+        propsOrSlotsContext()?.let { return@withContext it }
+        val models = getQuiet("/v1/models") ?: return@withContext null
+        pickModelContextLength(modelsFromJson(models), modelId)
+    }
+
+    /** n_ctx from llama-server only. Null when this backend has no /props or /slots. */
+    suspend fun propsOrSlotsContext(): Int? = withContext(Dispatchers.IO) {
         val props = getQuiet("/props")
         if (props != null) {
             parseContextSize(props)?.let { return@withContext it }
