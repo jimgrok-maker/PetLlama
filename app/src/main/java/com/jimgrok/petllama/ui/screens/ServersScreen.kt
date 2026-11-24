@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jimgrok.petllama.data.ServerEntity
+import com.jimgrok.petllama.network.parseContextOverride
 import com.jimgrok.petllama.ui.ServersViewModel
 import com.jimgrok.petllama.ui.serversViewModelFactory
 
@@ -106,8 +107,9 @@ fun ServersScreen(
             initialName = "",
             initialUrl = "",
             initialKey = "",
-            onSave = { name, url, key ->
-                viewModel.save(name, url, key, null)
+            initialContext = "",
+            onSave = { name, url, key, context ->
+                viewModel.save(name, url, key, context, null)
                 showAdd = false
             },
             onDismiss = { showAdd = false }
@@ -120,8 +122,9 @@ fun ServersScreen(
             initialName = server.name,
             initialUrl = server.url,
             initialKey = server.apiKey,
-            onSave = { name, url, key ->
-                viewModel.save(name, url, key, server.id)
+            initialContext = server.contextLength?.takeIf { it > 0 }?.toString().orEmpty(),
+            onSave = { name, url, key, context ->
+                viewModel.save(name, url, key, context, server.id)
                 editing = null
             },
             onDismiss = { editing = null }
@@ -173,12 +176,14 @@ fun ServerEditSheet(
     initialName: String,
     initialUrl: String,
     initialKey: String,
-    onSave: (String, String, String) -> Unit,
+    initialContext: String,
+    onSave: (String, String, String, Int?) -> Unit,
     onDismiss: () -> Unit
 ) {
     var name by remember { mutableStateOf(initialName) }
     var url by remember { mutableStateOf(initialUrl) }
     var key by remember { mutableStateOf(initialKey) }
+    var context by remember { mutableStateOf(initialContext) }
 
     val sheetState = rememberModalBottomSheetState()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -193,8 +198,19 @@ fun ServerEditSheet(
             OutlinedTextField(value = key, onValueChange = { key = it },
                 label = { Text("API key (optional)") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth())
-            Button(onClick = { if (name.isNotBlank() && url.isNotBlank()) onSave(name.trim(), url.trim(), key.trim()) },
-                modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            OutlinedTextField(
+                value = context,
+                onValueChange = { raw -> context = raw.filter { it.isDigit() } },
+                label = { Text("Context size (tokens, optional)") },
+                placeholder = { Text("Auto") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(onClick = {
+                if (name.isNotBlank() && url.isNotBlank()) {
+                    onSave(name.trim(), url.trim(), key.trim(), parseContextOverride(context))
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
             TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Cancel") }
         }
     }

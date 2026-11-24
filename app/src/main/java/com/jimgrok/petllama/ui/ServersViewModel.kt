@@ -30,10 +30,18 @@ class ServersViewModel : ViewModel() {
         }
     }
 
-    fun save(name: String, url: String, apiKey: String, existingId: Long?) {
+    fun save(name: String, url: String, apiKey: String, contextLength: Int?, existingId: Long?) {
         viewModelScope.launch {
             val id = if (existingId == null) 0L else existingId
-            Db.servers.upsert(ServerEntity(id = id, name = name, url = url, apiKey = apiKey))
+            Db.servers.upsert(
+                ServerEntity(
+                    id = id,
+                    name = name,
+                    url = url,
+                    apiKey = apiKey,
+                    contextLength = contextLength?.takeIf { it > 0 }
+                )
+            )
         }
     }
 

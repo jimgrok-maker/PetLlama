@@ -10,6 +10,8 @@ import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.CompletionStats
 import com.jimgrok.petllama.network.DEFAULT_MAX_TOOL_CALLS
+import com.jimgrok.petllama.network.effectiveContextLength
+import com.jimgrok.petllama.network.pickModelContextLength
 import com.jimgrok.petllama.network.ExposedTool
 import com.jimgrok.petllama.network.LiveTokenSpeed
 import com.jimgrok.petllama.network.LlamaClient
@@ -86,18 +88,28 @@ class ChatViewModel : ViewModel() {
     private var nextTempId = -1L
     private val liveSpeed = LiveTokenSpeed()
     private var contextLoadedFor: Long? = null
+    /** n_ctx from /props or /slots. Null on backends that do not have those. */
+    private var propsContext: Int? = null
     /** Stop is ignored until the model request itself has started. */
     private var acceptStop = false
 
     fun init(serverId: Long) {
         // The screen calls this again after rotation. The load job stays active
         // for the life of the screen, so don't start a second collector.
-        if (loadJob?.isActive == true && _state.value.server?.id == serverId) return
+        if (loadJob?.isActive == true && _state.value.server?.id == serverId) {
+            viewModelScope.launch {
+                val server = Db.servers.getById(serverId) ?: return@launch
+                _state.update { it.copy(server = server) }
+                publishContext()
+            }
+            return
+        }
         loadJob?.cancel()
         propsJob?.cancel()
         loadJob = viewModelScope.launch {
             val server = Db.servers.getById(serverId) ?: return@launch
             _state.update { it.copy(server = server) }
+            publishContext()
             try {
                 val models = LlamaClient(server).listModels()
                 _state.update { s ->
@@ -107,6 +119,7 @@ class ChatViewModel : ViewModel() {
                         error = if (s.error?.startsWith("Failed to load models") == true) null else s.error
                     )
                 }
+                publishContext()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -122,15 +135,29 @@ class ChatViewModel : ViewModel() {
             if (contextLoadedFor == serverId) return@launch
             val server = Db.servers.getById(serverId) ?: return@launch
             val nCtx = try {
-                LlamaClient(server).contextLength()
+                LlamaClient(server).propsOrSlotsContext()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 null
             }
             contextLoadedFor = serverId
-            if (nCtx != null) _state.update { it.copy(contextSize = nCtx) }
+            propsContext = nCtx
+            publishContext()
         }
+    }
+
+    fun selectModel(id: String) {
+        _state.update { it.copy(selectedModel = id, error = null) }
+        publishContext()
+    }
+
+    /** Manual size, then llama-server n_ctx, then the selected model's /v1/models length. */
+    private fun publishContext() {
+        val st = _state.value
+        val detected = propsContext ?: pickModelContextLength(st.models, st.selectedModel)
+        val size = effectiveContextLength(st.server?.contextLength, detected)
+        _state.update { if (it.contextSize == size) it else it.copy(contextSize = size) }
     }
 
     fun newConversation() {
@@ -176,7 +203,6 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun selectModel(id: String) = _state.update { it.copy(selectedModel = id, error = null) }
     fun setTemperature(v: Float) = _state.update { it.copy(temperature = v) }
     fun setTopP(v: Float) = _state.update { it.copy(topP = v) }
     fun setMaxTokens(v: Int) = _state.update { it.copy(maxTokens = v) }

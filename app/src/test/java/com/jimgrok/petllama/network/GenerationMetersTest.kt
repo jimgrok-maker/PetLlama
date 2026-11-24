@@ -54,6 +54,49 @@ class GenerationMetersTest {
     }
 
     @Test
+    fun v1ModelsReportContextLengthAndPreferTheSelectedModel() {
+        val body = """
+            {"object":"list","data":[
+              {"id":"small","object":"model","max_model_len":8192},
+              {"id":"qwen3.8-27b","object":"model","max_model_len":32768,
+               "meta":{"n_ctx_train":131072}},
+              {"id":"alias","context_length":4096},
+              {"id":"window","max_context_length":2048},
+              {"id":"ctx","context_window":1024},
+              {"id":"meta","meta":{"n_ctx":16384}}
+            ]}
+        """.trimIndent()
+        val models = modelsFromJson(body)
+        assertEquals(8192, models.first { it.id == "small" }.contextLength)
+        assertEquals(32768, pickModelContextLength(models, "qwen3.8-27b"))
+        assertEquals(8192, pickModelContextLength(models, "missing-model"))
+        assertEquals(8192, pickModelContextLength(models, null))
+        assertEquals(4096, models.first { it.id == "alias" }.contextLength)
+        assertEquals(2048, models.first { it.id == "window" }.contextLength)
+        assertEquals(1024, models.first { it.id == "ctx" }.contextLength)
+        assertEquals(16384, models.first { it.id == "meta" }.contextLength)
+        val one = modelsFromJson("""{"id":"ninfer","max_model_len":65536}""")
+        assertEquals(65536, pickModelContextLength(one, "ninfer"))
+        assertEquals(16384, modelContextLength(
+            com.google.gson.JsonParser.parseString("""{"meta":{"n_ctx_train":16384}}""").asJsonObject
+        ))
+    }
+
+    @Test
+    fun manualContextSizeOverridesDetection() {
+        assertEquals(8192, effectiveContextLength(8192, 32768))
+        assertEquals(32768, effectiveContextLength(null, 32768))
+        assertEquals(32768, effectiveContextLength(0, 32768))
+        assertEquals(32768, effectiveContextLength(-5, 32768))
+        assertNull(effectiveContextLength(null, null))
+        assertNull(effectiveContextLength(0, 0))
+        assertNull(parseContextOverride(""))
+        assertNull(parseContextOverride("0"))
+        assertNull(parseContextOverride("auto"))
+        assertEquals(32768, parseContextOverride(" 32768 "))
+    }
+
+    @Test
     fun propsAndSlotsProvideContextLength() {
         assertEquals(32768, parseContextSize("""{"default_generation_settings":{"n_ctx":32768}}"""))
         assertEquals(4096, parseContextSize("""{"n_ctx":4096}"""))

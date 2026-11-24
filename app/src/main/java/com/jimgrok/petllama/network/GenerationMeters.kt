@@ -62,6 +62,72 @@ fun completionStatsFrom(root: JsonObject): CompletionStats? {
     return CompletionStats(predicted, prompt, used)
 }
 
+/**
+ * Context window from a `/v1/models` body. [modelId] wins when that model
+ * reports a positive length; otherwise the first positive length in the list.
+ * NInfer and vLLM send `max_model_len`. Other backends use the aliases below.
+ */
+fun pickModelContextLength(models: List<ModelInfo>, modelId: String?): Int? {
+    if (!modelId.isNullOrBlank()) {
+        models.firstOrNull { it.id == modelId }?.contextLength?.takeIf { it > 0 }?.let { return it }
+    }
+    return models.firstNotNullOfOrNull { it.contextLength?.takeIf { n -> n > 0 } }
+}
+
+/** A typed context size. Blank, zero, and negative mean Auto. */
+fun parseContextOverride(text: String): Int? =
+    text.trim().toIntOrNull()?.takeIf { it > 0 }
+
+/**
+ * Manual size wins when it is above zero. Otherwise [detected] is the
+ * auto value from /props, /slots, or /v1/models.
+ */
+fun effectiveContextLength(manual: Int?, detected: Int?): Int? {
+    if (manual != null && manual > 0) return manual
+    return detected?.takeIf { it > 0 }
+}
+
+/** Models from `GET /v1/models` or from one model object. */
+fun modelsFromJson(json: String): List<ModelInfo> {
+    val root = runCatching { JsonParser.parseString(json) }.getOrNull() ?: return emptyList()
+    if (root.isJsonArray) {
+        return root.asJsonArray.mapNotNull { element ->
+            if (element.isJsonObject) modelInfoFrom(element.asJsonObject) else null
+        }
+    }
+    if (!root.isJsonObject) return emptyList()
+    val obj = root.asJsonObject
+    val data = obj.get("data")
+    if (data != null && data.isJsonArray) {
+        return data.asJsonArray.mapNotNull { element ->
+            if (element.isJsonObject) modelInfoFrom(element.asJsonObject) else null
+        }
+    }
+    return listOfNotNull(modelInfoFrom(obj))
+}
+
+fun modelContextLength(model: JsonObject): Int? {
+    for (key in listOf("max_model_len", "context_length", "max_context_length", "context_window", "n_ctx")) {
+        model.intOrNull(key)?.takeIf { it > 0 }?.let { return it }
+    }
+    val meta = model.getObject("meta") ?: return null
+    meta.intOrNull("n_ctx")?.takeIf { it > 0 }?.let { return it }
+    return meta.intOrNull("n_ctx_train")?.takeIf { it > 0 }
+}
+
+private fun modelInfoFrom(obj: JsonObject): ModelInfo? {
+    val id = obj.stringOrNull("id") ?: obj.stringOrNull("name") ?: return null
+    val name = obj.stringOrNull("name") ?: id
+    return ModelInfo(id = id, name = name, contextLength = modelContextLength(obj))
+}
+
+private fun JsonObject.stringOrNull(name: String): String? {
+    val value = get(name) ?: return null
+    if (!value.isJsonPrimitive || value.isJsonNull) return null
+    val text = value.asString.trim()
+    return text.ifEmpty { null }
+}
+
 fun parseContextSize(propsOrSlotsJson: String): Int? {
     val root = runCatching { JsonParser.parseString(propsOrSlotsJson) }.getOrNull() ?: return null
     if (root.isJsonArray) {
