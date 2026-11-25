@@ -2,32 +2,35 @@ package com.jimgrok.petllama.ui.chat
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.data.ConversationEntity
 import com.jimgrok.petllama.data.Db
+import com.jimgrok.petllama.data.McpServerEntity
 import com.jimgrok.petllama.data.MessageEntity
 import com.jimgrok.petllama.data.ServerEntity
-import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.network.ChatRequest
 import com.jimgrok.petllama.network.CompletionStats
 import com.jimgrok.petllama.network.DEFAULT_MAX_TOOL_CALLS
-import com.jimgrok.petllama.network.effectiveContextLength
-import com.jimgrok.petllama.network.pickModelContextLength
 import com.jimgrok.petllama.network.ExposedTool
 import com.jimgrok.petllama.network.LiveTokenSpeed
 import com.jimgrok.petllama.network.LlamaClient
 import com.jimgrok.petllama.network.McpClient
-import com.jimgrok.petllama.network.toUserMessage
+import com.jimgrok.petllama.network.McpTool
 import com.jimgrok.petllama.network.ModelInfo
 import com.jimgrok.petllama.network.Msg
 import com.jimgrok.petllama.network.ToolCatalog
+import com.jimgrok.petllama.network.effectiveContextLength
+import com.jimgrok.petllama.network.explain
+import com.jimgrok.petllama.network.pickModelContextLength
 import com.jimgrok.petllama.network.runToolLoop
+import com.jimgrok.petllama.network.toUserMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,16 +97,32 @@ class ChatViewModel : ViewModel() {
     private var acceptStop = false
 
     fun init(serverId: Long) {
-        // The screen calls this again after rotation. The load job stays active
-        // for the life of the screen, so don't start a second collector.
+        // The screen calls this again after rotation or returning from ServersScreen.
+        // Keep the existing loader unless the server URL or API key changed.
         if (loadJob?.isActive == true && _state.value.server?.id == serverId) {
             viewModelScope.launch {
                 val server = Db.servers.getById(serverId) ?: return@launch
+                val prev = _state.value.server
+                val endpointChanged = prev == null || prev.url != server.url || prev.apiKey != server.apiKey
                 _state.update { it.copy(server = server) }
-                publishContext()
+                if (endpointChanged) {
+                    contextLoadedFor = null
+                    propsContext = null
+                    _state.update { it.copy(models = emptyList(), selectedModel = "") }
+                    startLoad(serverId)
+                } else {
+                    publishContext()
+                }
             }
             return
         }
+        if (contextLoadedFor != serverId) {
+            propsContext = null
+        }
+        startLoad(serverId)
+    }
+
+    private fun startLoad(serverId: Long) {
         loadJob?.cancel()
         propsJob?.cancel()
         loadJob = viewModelScope.launch {
@@ -166,7 +185,18 @@ class ChatViewModel : ViewModel() {
             val id = Db.conversations.insert(
                 ConversationEntity(serverId = serverId, model = _state.value.selectedModel)
             )
-            _state.update { it.copy(activeConversationId = id, messages = emptyList(), error = null) }
+            _state.update {
+                it.copy(
+                    activeConversationId = id,
+                    messages = emptyList(),
+                    error = null,
+                    toolNotice = null,
+                    usedTokens = null,
+                    tokensPerSecond = null,
+                    promptPerSecond = null,
+                    speedLive = false
+                )
+            }
         }
     }
 
@@ -187,7 +217,12 @@ class ChatViewModel : ViewModel() {
                             toolError = m.toolError
                         )
                     },
-                    error = null
+                    error = null,
+                    toolNotice = null,
+                    usedTokens = null,
+                    tokensPerSecond = null,
+                    promptPerSecond = null,
+                    speedLive = false
                 )
             }
         }
@@ -198,7 +233,17 @@ class ChatViewModel : ViewModel() {
             val conv = Db.conversations.getById(id) ?: return@launch
             Db.conversations.deleteConversation(conv)
             if (_state.value.activeConversationId == id) {
-                _state.update { it.copy(activeConversationId = null, messages = emptyList()) }
+                _state.update {
+                    it.copy(
+                        activeConversationId = null,
+                        messages = emptyList(),
+                        toolNotice = null,
+                        usedTokens = null,
+                        tokensPerSecond = null,
+                        promptPerSecond = null,
+                        speedLive = false
+                    )
+                }
             }
         }
     }
@@ -296,11 +341,16 @@ class ChatViewModel : ViewModel() {
         val reasoning = listOfNotNull(streaming.reasoning, split.reasoning.takeIf { it.isNotEmpty() })
             .joinToString("\n\n")
             .ifBlank { null }
+        val answer = split.answer
+        if (answer.isBlank() && reasoning.isNullOrBlank()) {
+            _state.update { st -> st.copy(messages = st.messages.filterNot { it.id == streaming.id }) }
+            return
+        }
         val savedId = persistMessage(
             MessageEntity(
                 conversationId = convId,
                 role = "assistant",
-                content = split.answer.ifBlank { streaming.content },
+                content = answer,
                 reasoning = reasoning
             )
         )
@@ -309,7 +359,7 @@ class ChatViewModel : ViewModel() {
                 if (msg.id == streaming.id) {
                     msg.copy(
                         id = savedId,
-                        content = split.answer.ifBlank { streaming.content },
+                        content = answer,
                         reasoning = reasoning,
                         isStreaming = false
                     )
@@ -351,18 +401,20 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private suspend fun loadCatalog(): ToolCatalog? {
+    private suspend fun loadCatalog(sessions: MutableMap<Long, McpClient>): ToolCatalog? {
         val servers = withContext(Dispatchers.IO) { Db.mcp.listEnabled() }
         if (servers.isEmpty()) return null
-        val groups = mutableListOf<Pair<com.jimgrok.petllama.data.McpServerEntity, List<com.jimgrok.petllama.network.McpTool>>>()
+        val groups = mutableListOf<Pair<McpServerEntity, List<McpTool>>>()
         val problems = mutableListOf<String>()
         for (server in servers) {
+            val client = sessions.getOrPut(server.id) { McpClient(server) }
             try {
-                groups += server to McpClient(server).listTools()
+                groups += server to client.listTools()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                problems += "${server.name}: ${e.message}"
+                sessions.remove(server.id)?.let { runCatching { it.close() } }
+                problems += "${server.name}: ${e.explain()}"
             }
         }
         if (problems.isNotEmpty()) {
@@ -418,92 +470,92 @@ class ChatViewModel : ViewModel() {
             try {
                 liveSpeed.reset()
                 _state.update { it.copy(speedLive = true, tokensPerSecond = null, promptPerSecond = null) }
-                val catalog = if (s.toolsEnabled) loadCatalog() else null
+                val catalog = if (s.toolsEnabled) loadCatalog(sessions) else null
                 acceptStop = true
                 GenerationGuard.start()
                 val loop = runToolLoop(
-                        llama = client,
-                        messages = messages,
-                        buildRequest = { msgs, tools ->
-                            ChatRequest(
-                                model = model,
-                                messages = msgs,
-                                stream = true,
-                                temperature = s.temperature,
-                                topP = s.topP,
-                                maxTokens = s.maxTokens,
-                                tools = tools
-                            )
-                        },
-                        maxToolCalls = s.maxToolCalls,
-                        catalog = catalog,
-                        callTool = { exposed: ExposedTool, args: String ->
-                            val mcp = sessions.getOrPut(exposed.server.id) { McpClient(exposed.server) }
-                            mcp.callTool(exposed.tool.name, args)
-                        },
-                        onContent = { chunk ->
-                            appendAssistantChunk(chunk)
-                            val speed = liveSpeed.onContentDelta()
-                            if (speed != null) {
-                                _state.update { st ->
-                                    if (st.speedLive) st.copy(tokensPerSecond = speed) else st
-                                }
-                            }
-                        },
-                        onContentRevised = { text -> replaceAssistantContent(text) },
-                        onMetrics = { stats -> applyServerStats(stats) },
-                        onReasoning = { chunk -> appendReasoning(chunk) },
-                        onReasoningRevised = { text -> replaceAssistantReasoning(text) },
-                        onRoundDone = {
-                            finishAssistantBubble(convId)
-                            liveSpeed.reset()
-                            _state.update { it.copy(speedLive = false) }
-                        },
-                        onToolStart = { serverName, toolName, arguments ->
-                            val id = tempId()
-                            toolBubbleId = id
+                    llama = client,
+                    messages = messages,
+                    buildRequest = { msgs, tools ->
+                        ChatRequest(
+                            model = model,
+                            messages = msgs,
+                            stream = true,
+                            temperature = s.temperature,
+                            topP = s.topP,
+                            maxTokens = s.maxTokens,
+                            tools = tools
+                        )
+                    },
+                    maxToolCalls = s.maxToolCalls,
+                    catalog = catalog,
+                    callTool = { exposed: ExposedTool, args: String ->
+                        val mcp = sessions.getOrPut(exposed.server.id) { McpClient(exposed.server) }
+                        mcp.callTool(exposed.tool.name, args)
+                    },
+                    onContent = { chunk ->
+                        appendAssistantChunk(chunk)
+                        val speed = liveSpeed.onContentDelta()
+                        if (speed != null) {
                             _state.update { st ->
-                                st.copy(
-                                    messages = st.messages + UiMessage(
-                                        id = id,
-                                        role = "tool",
-                                        content = "Running…",
-                                        isStreaming = true,
-                                        toolName = "$serverName / $toolName",
-                                        toolArgs = arguments
-                                    )
-                                )
+                                if (st.speedLive) st.copy(tokensPerSecond = speed) else st
                             }
-                        },
-                        onToolResult = { trace ->
-                            val id = toolBubbleId ?: tempId()
-                            val savedId = persistMessage(
-                                MessageEntity(
-                                    conversationId = convId,
-                                    role = "tool",
-                                    content = trace.result,
-                                    toolName = "${trace.serverName} / ${trace.toolName}",
-                                    toolArgs = trace.arguments,
-                                    toolError = trace.isError
-                                )
-                            )
-                            _state.update { st ->
-                                val list = st.messages.toMutableList()
-                                val idx = list.indexOfLast { it.id == id }
-                                val bubble = UiMessage(
-                                    id = savedId,
-                                    role = "tool",
-                                    content = trace.result,
-                                    toolName = "${trace.serverName} / ${trace.toolName}",
-                                    toolArgs = trace.arguments,
-                                    toolError = trace.isError
-                                )
-                                if (idx >= 0) list[idx] = bubble else list += bubble
-                                st.copy(messages = list)
-                            }
-                            toolBubbleId = null
                         }
-                    )
+                    },
+                    onContentRevised = { revised -> replaceAssistantContent(revised) },
+                    onMetrics = { stats -> applyServerStats(stats) },
+                    onReasoning = { chunk -> appendReasoning(chunk) },
+                    onReasoningRevised = { revised -> replaceAssistantReasoning(revised) },
+                    onRoundDone = {
+                        finishAssistantBubble(convId)
+                        liveSpeed.reset()
+                        _state.update { it.copy(speedLive = false) }
+                    },
+                    onToolStart = { serverName, toolName, arguments ->
+                        val id = tempId()
+                        toolBubbleId = id
+                        _state.update { st ->
+                            st.copy(
+                                messages = st.messages + UiMessage(
+                                    id = id,
+                                    role = "tool",
+                                    content = "Running…",
+                                    isStreaming = true,
+                                    toolName = "$serverName / $toolName",
+                                    toolArgs = arguments
+                                )
+                            )
+                        }
+                    },
+                    onToolResult = { trace ->
+                        val id = toolBubbleId ?: tempId()
+                        val savedId = persistMessage(
+                            MessageEntity(
+                                conversationId = convId,
+                                role = "tool",
+                                content = trace.result,
+                                toolName = "${trace.serverName} / ${trace.toolName}",
+                                toolArgs = trace.arguments,
+                                toolError = trace.isError
+                            )
+                        )
+                        _state.update { st ->
+                            val list = st.messages.toMutableList()
+                            val idx = list.indexOfLast { it.id == id }
+                            val bubble = UiMessage(
+                                id = savedId,
+                                role = "tool",
+                                content = trace.result,
+                                toolName = "${trace.serverName} / ${trace.toolName}",
+                                toolArgs = trace.arguments,
+                                toolError = trace.isError
+                            )
+                            if (idx >= 0) list[idx] = bubble else list += bubble
+                            st.copy(messages = list)
+                        }
+                        toolBubbleId = null
+                    }
+                )
                 if (loop.hitToolLimit) {
                     val cap = s.maxToolCalls.coerceIn(1, 100)
                     _state.update {
@@ -512,44 +564,44 @@ class ChatViewModel : ViewModel() {
                         )
                     }
                 }
-                } catch (e: CancellationException) {
-                    // stop pressed — keep partial text and finished tool bubbles
-                } catch (e: Exception) {
-                    error = e.toUserMessage()
-                } finally {
-                    acceptStop = false
-                    sessions.values.forEach { runCatching { it.close() } }
-                    GenerationGuard.stop()
-                    withContext(NonCancellable) {
-                        finishAssistantBubble(convId)
-                        _state.update { st ->
-                            st.copy(
-                                messages = st.messages.filterNot { it.isStreaming && it.role == "tool" && it.content == "Running…" },
-                                streaming = false,
-                                error = error ?: st.error
-                            )
-                        }
-                        withContext(Dispatchers.IO) {
-                            val conv = Db.conversations.getById(convId)
-                            if (conv != null) {
-                                Db.conversations.update(
-                                    conv.copy(
-                                        updatedAt = System.currentTimeMillis(),
-                                        title = if (conv.title == "New chat") text.take(40) else conv.title
-                                    )
+            } catch (e: CancellationException) {
+                // stop pressed — keep partial text and finished tool bubbles
+            } catch (e: Exception) {
+                error = e.toUserMessage()
+            } finally {
+                acceptStop = false
+                sessions.values.forEach { runCatching { it.close() } }
+                GenerationGuard.stop()
+                withContext(NonCancellable) {
+                    finishAssistantBubble(convId)
+                    _state.update { st ->
+                        st.copy(
+                            messages = st.messages.filterNot { it.isStreaming && it.role == "tool" && it.content == "Running…" },
+                            streaming = false,
+                            error = error ?: st.error
+                        )
+                    }
+                    withContext(Dispatchers.IO) {
+                        val conv = Db.conversations.getById(convId)
+                        if (conv != null) {
+                            Db.conversations.update(
+                                conv.copy(
+                                    updatedAt = System.currentTimeMillis(),
+                                    title = if (conv.title == "New chat") text.take(40) else conv.title
                                 )
-                            }
+                            )
                         }
                     }
                 }
+            }
         }
     }
 }
 
 /**
  * Messages to send to the model. [history] already includes the new user row.
- * Streaming placeholders (negative ids) and tool bubbles are left out.
- * The user text is not added again.
+ * Streaming placeholders (negative ids), tool bubbles, and blank reasoning-only
+ * rows are left out. The user text is not added again.
  */
 internal fun outgoingMessages(
     history: List<UiMessage>,
@@ -558,7 +610,7 @@ internal fun outgoingMessages(
 ): List<Msg> {
     val msgs = ArrayList<Msg>(history.size + 1)
     if (systemPrompt.isNotBlank()) msgs += Msg("system", systemPrompt)
-    history.filter { it.id >= 0 && it.role != "tool" }.takeLast(limit).forEach {
+    history.filter { it.id >= 0 && it.role != "tool" && it.content.isNotBlank() }.takeLast(limit).forEach {
         msgs += Msg(it.role, it.content)
     }
     return msgs

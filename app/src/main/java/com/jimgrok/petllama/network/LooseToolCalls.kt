@@ -1,7 +1,9 @@
 package com.jimgrok.petllama.network
 
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 
 /** A tool call recovered from assistant text, not from a structured tool_calls field. */
 data class LooseToolCall(
@@ -114,9 +116,10 @@ internal fun ToolCatalog.findLoose(rawName: String): ExposedTool? {
 }
 
 /**
- * Drops arguments the tool's input schema does not list. `get_file_contents`
- * often receives `sha` from the model; if the schema has `ref` and not `sha`,
- * that value is sent as `ref`.
+ * Drops arguments the tool's input schema does not list and coerces stringified
+ * XML arguments (integers, numbers, booleans, arrays, objects) to match the
+ * schema types. `get_file_contents` often receives `sha` from the model; if
+ * the schema has `ref` and not `sha`, that value is sent as `ref`.
  */
 internal fun fitArguments(tool: McpTool, argumentsJson: String): String {
     val parsed = runCatching { JsonParser.parseString(argumentsJson.ifBlank { "{}" }) }.getOrNull()
@@ -133,7 +136,56 @@ internal fun fitArguments(tool: McpTool, argumentsJson: String): String {
         args.remove("sha")
     }
     args.keySet().filter { it !in allowed }.toList().forEach { args.remove(it) }
+    for (key in args.keySet().toList()) {
+        val value = args.get(key)
+        val propSchema = properties.get(key)?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+        val coerced = coerceArgument(value, propSchema)
+        if (coerced != null) args.add(key, coerced)
+    }
     return args.toString()
+}
+
+private fun coerceArgument(value: JsonElement, propSchema: JsonObject): JsonElement? {
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) return null
+    val types = schemaTypes(propSchema)
+    if (types.isEmpty() || "string" in types) return null
+    val raw = value.asString.trim()
+    if (raw.isEmpty()) return null
+    if ("boolean" in types) {
+        if (raw.equals("true", ignoreCase = true)) return JsonPrimitive(true)
+        if (raw.equals("false", ignoreCase = true)) return JsonPrimitive(false)
+    }
+    if ("integer" in types) {
+        raw.toLongOrNull()?.let { return JsonPrimitive(it) }
+    }
+    if ("number" in types) {
+        raw.toLongOrNull()?.let { return JsonPrimitive(it) }
+        raw.toDoubleOrNull()?.takeIf { it.isFinite() }?.let { return JsonPrimitive(it) }
+    }
+    if ("array" in types) {
+        runCatching { JsonParser.parseString(raw) }.getOrNull()
+            ?.takeIf { it.isJsonArray }
+            ?.let { return it }
+    }
+    if ("object" in types) {
+        runCatching { JsonParser.parseString(raw) }.getOrNull()
+            ?.takeIf { it.isJsonObject }
+            ?.let { return it }
+    }
+    return null
+}
+
+private fun schemaTypes(schema: JsonObject): Set<String> {
+    val typeEl = schema.get("type") ?: return emptySet()
+    return when {
+        typeEl.isJsonPrimitive && typeEl.asJsonPrimitive.isString -> setOf(typeEl.asString.lowercase())
+        typeEl.isJsonArray -> typeEl.asJsonArray
+            .mapNotNull { el ->
+                if (el.isJsonPrimitive && el.asJsonPrimitive.isString) el.asString.lowercase() else null
+            }
+            .toSet()
+        else -> emptySet()
+    }
 }
 
 private fun parseToolCallBody(body: String): LooseToolCall? {

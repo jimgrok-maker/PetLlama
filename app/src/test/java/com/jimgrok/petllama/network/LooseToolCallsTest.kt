@@ -58,6 +58,40 @@ class LooseToolCallsTest {
     }
 
     @Test
+    fun stringifiedXmlArgumentsAreCoercedToSchemaTypes() {
+        val schema = JsonParser.parseString(
+            """
+            {
+              "type": "object",
+              "properties": {
+                "perPage": {"type": "integer"},
+                "ratio": {"type": "number"},
+                "draft": {"type": "boolean"},
+                "fields": {"type": "array"},
+                "filter": {"type": ["object", "null"]},
+                "title": {"type": "string"}
+              }
+            }
+            """.trimIndent()
+        ).asJsonObject
+        val tool = McpTool("list_pull_requests", "list PRs", schema)
+        val raw = """{"perPage":"10","ratio":"0.5","draft":"false","fields":"[\"name\",\"type\"]","filter":"{\"state\":\"open\"}","title":"123"}"""
+        val fitted = JsonParser.parseString(fitArguments(tool, raw)).asJsonObject
+        assertTrue(fitted.get("perPage").asJsonPrimitive.isNumber)
+        assertEquals(10, fitted.get("perPage").asInt)
+        assertTrue(fitted.get("ratio").asJsonPrimitive.isNumber)
+        assertEquals(0.5, fitted.get("ratio").asDouble, 0.001)
+        assertTrue(fitted.get("draft").asJsonPrimitive.isBoolean)
+        assertFalse(fitted.get("draft").asBoolean)
+        assertTrue(fitted.get("fields").isJsonArray)
+        assertEquals(2, fitted.getAsJsonArray("fields").size())
+        assertTrue(fitted.get("filter").isJsonObject)
+        assertEquals("open", fitted.getAsJsonObject("filter").get("state").asString)
+        assertTrue(fitted.get("title").asJsonPrimitive.isString)
+        assertEquals("123", fitted.get("title").asString)
+    }
+
+    @Test
     fun prefixedNameMapsBackToThatServer() {
         val github = McpServerEntity(id = 2, name = "github", url = "https://example/mcp")
         val other = McpServerEntity(id = 4, name = "other", url = "http://example/mcp")
