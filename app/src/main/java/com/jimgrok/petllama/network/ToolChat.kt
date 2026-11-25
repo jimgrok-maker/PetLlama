@@ -1,5 +1,6 @@
 package com.jimgrok.petllama.network
 
+import com.google.gson.annotations.SerializedName
 import com.jimgrok.petllama.data.McpServerEntity
 
 /** A tool the model is allowed to call, with a name that is unique across servers. */
@@ -99,6 +100,7 @@ suspend fun runToolLoop(
 ): LoopResult {
     val limit = maxToolCalls.coerceAtLeast(1)
     var executed = 0
+    var truncatedByLimit = false
     while (true) {
         val toolsAvailable = catalog != null && catalog.tools.isNotEmpty()
         val underLimit = toolsAvailable && executed < limit
@@ -111,21 +113,23 @@ suspend fun runToolLoop(
             roundText.clear()
             roundReasoning.clear()
             partials.clear()
-            var events = 0
+            var streamTokensOrCalls = 0
             try {
                 llama.streamChat(buildRequest(messages, tools)).collect { event ->
-                    events++
                     when (event) {
                         is StreamEvent.Content -> {
+                            streamTokensOrCalls++
                             roundText.append(event.text)
                             onContent(event.text)
                         }
                         is StreamEvent.Metrics -> onMetrics(event.stats)
                         is StreamEvent.Reasoning -> {
+                            streamTokensOrCalls++
                             roundReasoning.append(event.text)
                             onReasoning(event.text)
                         }
                         is StreamEvent.ToolDelta -> {
+                            streamTokensOrCalls++
                             val partial = partials.getOrPut(event.index) { PartialCall() }
                             if (!event.id.isNullOrEmpty()) partial.id = event.id
                             if (!event.name.isNullOrEmpty()) partial.name = event.name
@@ -137,10 +141,8 @@ suspend fun runToolLoop(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // One retry when the socket dies before any token. A dropped
-                // connection after text has started is left as-is so we don't
-                // print the same words twice.
-                if (attempt == 0 && events == 0 && isTransientNetworkError(e)) {
+                // One retry when the socket dies before any token/tool delta.
+                if (attempt == 0 && streamTokensOrCalls == 0 && isTransientNetworkError(e)) {
                     attempt++
                     continue
                 }
@@ -161,20 +163,27 @@ suspend fun runToolLoop(
             onContentRevised(visible)
             onReasoningRevised(thinking)
         }
-        val pending = when {
-            structured.isNotEmpty() && underLimit -> structured.map {
+        val attemptedCalls = when {
+            structured.isNotEmpty() -> structured.map {
                 PendingCall(it.id, it.name, it.arguments.toString().ifBlank { "{}" })
             }
-            recovered != null && recovered.calls.isNotEmpty() && underLimit -> recovered.calls.mapIndexed { index, call ->
+            recovered != null && recovered.calls.isNotEmpty() -> recovered.calls.mapIndexed { index, call ->
                 PendingCall("xml_${executed}_$index", call.name, call.arguments.ifBlank { "{}" })
             }
             else -> emptyList()
         }
         onRoundDone()
-        if (pending.isEmpty()) {
-            return LoopResult(hitToolLimit = !underLimit && toolsAvailable && executed > 0)
+        if (!underLimit) {
+            return LoopResult(hitToolLimit = truncatedByLimit || (toolsAvailable && executed > 0 && attemptedCalls.isNotEmpty()))
         }
-        val batch = pending.take((limit - executed).coerceAtLeast(0))
+        if (attemptedCalls.isEmpty()) {
+            return LoopResult(hitToolLimit = truncatedByLimit)
+        }
+        val remaining = (limit - executed).coerceAtLeast(0)
+        val batch = attemptedCalls.take(remaining)
+        if (batch.size < attemptedCalls.size) {
+            truncatedByLimit = true
+        }
         if (batch.isEmpty()) {
             return LoopResult(hitToolLimit = true)
         }
