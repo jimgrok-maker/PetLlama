@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -67,16 +68,16 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
 import com.jimgrok.petllama.network.ContextBand
 import com.jimgrok.petllama.network.contextFill
 import com.jimgrok.petllama.network.formatSpeed
 import com.jimgrok.petllama.network.formatTokenCount
 import com.jimgrok.petllama.ui.rememberChatViewModel
-import com.google.gson.GsonBuilder
-import com.google.gson.JsonParser
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.tables.TablePlugin
 import kotlinx.coroutines.launch
@@ -98,10 +99,11 @@ fun ChatScreen(
     var showHistory by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var showModelMenu by remember { mutableStateOf(false) }
-    var menuMessage by remember { mutableStateOf<UiMessage?>(null) }
+    var menuMessageId by remember { mutableStateOf<Long?>(null) }
     var editing by remember { mutableStateOf<UiMessage?>(null) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val clipboardContext = LocalContext.current
 
     // auto-scroll to bottom on new messages
     LaunchedEffect(state.messages.size) {
@@ -117,8 +119,12 @@ fun ChatScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(state.server?.name ?: "Chat", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.padding(horizontal = 8.dp))
-                        Text(state.selectedModel, style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        Text(
+                            state.selectedModel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
                     }
                 },
                 navigationIcon = {
@@ -188,17 +194,22 @@ fun ChatScreen(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Model:", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Model:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.padding(horizontal = 8.dp))
-                    TextButton(onClick = { showModelMenu = true }) {
-                        Text(state.selectedModel.ifEmpty { "\u2014" }, color = MaterialTheme.colorScheme.primary)
-                    }
-                    if (showModelMenu) {
+                    Box {
+                        TextButton(onClick = { showModelMenu = true }) {
+                            Text(state.selectedModel.ifEmpty { "\u2014" }, color = MaterialTheme.colorScheme.primary)
+                        }
                         DropdownMenu(expanded = showModelMenu, onDismissRequest = { showModelMenu = false }) {
                             state.models.forEach { m ->
-                                DropdownMenuItem(text = { Text(m.id) },
-                                    onClick = { vm.selectModel(m.id); showModelMenu = false })
+                                DropdownMenuItem(
+                                    text = { Text(m.id) },
+                                    onClick = { vm.selectModel(m.id); showModelMenu = false }
+                                )
                             }
                         }
                     }
@@ -233,29 +244,60 @@ fun ChatScreen(
                     Spacer(Modifier.weight(1f))
                 }
             } else {
+                val lastAssistantId = state.messages.lastOrNull { it.role == "assistant" && !it.isStreaming }?.id
                 LazyColumn(
                     state = listState,
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(state.messages, key = { it.id }) { msg ->
-                        if (msg.role == "tool") {
-                            ToolTraceBubble(
-                                name = msg.toolName ?: "Tool",
-                                arguments = msg.toolArgs,
-                                result = msg.content,
-                                running = msg.isStreaming,
-                                failed = msg.toolError,
-                                onLongClick = { menuMessage = msg }
-                            )
-                        } else {
-                            MessageBubble(
-                                role = msg.role,
-                                content = msg.content,
-                                reasoning = msg.reasoning,
-                                isStreaming = msg.isStreaming,
-                                onLongClick = { menuMessage = msg }
-                            )
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            if (msg.role == "tool") {
+                                ToolTraceBubble(
+                                    name = msg.toolName ?: "Tool",
+                                    arguments = msg.toolArgs,
+                                    result = msg.content,
+                                    running = msg.isStreaming,
+                                    failed = msg.toolError,
+                                    onLongClick = { menuMessageId = msg.id }
+                                )
+                            } else {
+                                MessageBubble(
+                                    role = msg.role,
+                                    content = msg.content,
+                                    reasoning = msg.reasoning,
+                                    isStreaming = msg.isStreaming,
+                                    onLongClick = { menuMessageId = msg.id }
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = menuMessageId == msg.id,
+                                onDismissRequest = { menuMessageId = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Copy") },
+                                    onClick = {
+                                        copyToClipboard(clipboardContext, msg.content)
+                                        menuMessageId = null
+                                    }
+                                )
+                                if (msg.role == "user" && !state.streaming) {
+                                    DropdownMenuItem(
+                                        text = { Text("Edit and resend") },
+                                        onClick = { editing = msg; menuMessageId = null }
+                                    )
+                                }
+                                if (msg.role == "assistant" && msg.id == lastAssistantId && !state.streaming) {
+                                    DropdownMenuItem(
+                                        text = { Text("Regenerate") },
+                                        onClick = { vm.regenerate(); menuMessageId = null }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Continue") },
+                                        onClick = { vm.continueReply(); menuMessageId = null }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -277,30 +319,6 @@ fun ChatScreen(
             onSystemPrompt = vm::setSystemPrompt,
             onDismiss = { showParams = false }
         )
-    }
-
-    val clipboardContext = LocalContext.current
-    menuMessage?.let { msg ->
-        val lastAssistant = state.messages.lastOrNull { it.role == "assistant" && !it.isStreaming }
-        DropdownMenu(expanded = true, onDismissRequest = { menuMessage = null }) {
-            DropdownMenuItem(
-                text = { Text("Copy") },
-                onClick = {
-                    copyToClipboard(clipboardContext, msg.content)
-                    menuMessage = null
-                }
-            )
-            if (msg.role == "user" && !state.streaming) {
-                DropdownMenuItem(
-                    text = { Text("Edit and resend") },
-                    onClick = { editing = msg; menuMessage = null }
-                )
-            }
-            if (msg.role == "assistant" && msg.id == lastAssistant?.id && !state.streaming) {
-                DropdownMenuItem(text = { Text("Regenerate") }, onClick = { vm.regenerate(); menuMessage = null })
-                DropdownMenuItem(text = { Text("Continue") }, onClick = { vm.continueReply(); menuMessage = null })
-            }
-        }
     }
 
     editing?.let { msg ->
@@ -587,14 +605,19 @@ fun ParamsSheet(
 ) {
     var temp by remember { mutableStateOf(temperature) }
     var top by remember { mutableStateOf(topP) }
-    var maxTok by remember { mutableStateOf(maxTokens) }
-    var maxTools by remember { mutableStateOf(maxToolCalls) }
+    var maxTok by remember { mutableStateOf(maxTokens.toString()) }
+    var maxTools by remember { mutableStateOf(maxToolCalls.toString()) }
     var sys by remember { mutableStateOf(systemPrompt) }
 
     val sheetState = androidx.compose.material3.rememberModalBottomSheetState()
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(modifier = Modifier.padding(24.dp).padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(
+            modifier = Modifier
+                .padding(24.dp)
+                .padding(bottom = 32.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
             Text("Chat parameters", style = MaterialTheme.typography.titleLarge)
 
             Text("Temperature: ${"%.2f".format(temp)}", style = MaterialTheme.typography.bodyMedium)
@@ -604,20 +627,34 @@ fun ParamsSheet(
             Slider(value = top, onValueChange = { top = it }, valueRange = 0f..1f, steps = 9)
 
             Text("Max tokens", style = MaterialTheme.typography.bodyMedium)
-            OutlinedTextField(value = maxTok.toString(), onValueChange = { maxTok = it.toIntOrNull() ?: maxTok },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                value = maxTok,
+                onValueChange = { raw -> maxTok = raw.filter { it.isDigit() } },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Text("Max tool calls (default 25)", style = MaterialTheme.typography.bodyMedium)
-            OutlinedTextField(value = maxTools.toString(), onValueChange = { maxTools = it.toIntOrNull() ?: maxTools },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                value = maxTools,
+                onValueChange = { raw -> maxTools = raw.filter { it.isDigit() } },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Text("System prompt", style = MaterialTheme.typography.bodyMedium)
-            OutlinedTextField(value = sys, onValueChange = { sys = it },
-                modifier = Modifier.fillMaxWidth().height(120.dp))
+            OutlinedTextField(
+                value = sys,
+                onValueChange = { sys = it },
+                modifier = Modifier.fillMaxWidth().height(120.dp)
+            )
 
             androidx.compose.material3.Button(onClick = {
-                onTemperature(temp); onTopP(top); onMaxTokens(maxTok)
-                onMaxToolCalls(maxTools); onSystemPrompt(sys)
+                onTemperature(temp)
+                onTopP(top)
+                onMaxTokens(maxTok.toIntOrNull()?.takeIf { it > 0 } ?: maxTokens)
+                onMaxToolCalls(maxTools.toIntOrNull()?.takeIf { it > 0 } ?: maxToolCalls)
+                onSystemPrompt(sys)
                 onDismiss()
             }, modifier = Modifier.fillMaxWidth()) { Text("Apply") }
         }
