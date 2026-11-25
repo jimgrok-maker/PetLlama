@@ -2,8 +2,6 @@ package com.jimgrok.petllama.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -15,6 +13,7 @@ import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.ui.chat.ChatScreen
 import com.jimgrok.petllama.ui.mcp.McpServersScreen
 import com.jimgrok.petllama.ui.screens.ServersScreen
+import com.jimgrok.petllama.ui.theme.PetLlamaTheme
 import kotlinx.coroutines.flow.first
 
 /**
@@ -25,7 +24,7 @@ import kotlinx.coroutines.flow.first
  */
 @Composable
 fun RootScreen() {
-    MaterialTheme(colorScheme = darkColorScheme()) {
+    PetLlamaTheme {
         var selectedServerId by rememberSaveable { mutableStateOf<Long?>(null) }
         var showMcp by rememberSaveable { mutableStateOf(false) }
         var didInitialLoad by rememberSaveable { mutableStateOf(false) }

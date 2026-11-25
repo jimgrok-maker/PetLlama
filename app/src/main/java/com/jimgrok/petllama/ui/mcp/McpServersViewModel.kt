@@ -5,9 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.data.McpServerEntity
 import com.jimgrok.petllama.network.McpClient
-import com.jimgrok.petllama.network.toUserMessage
 import com.jimgrok.petllama.network.headersToJson
 import com.jimgrok.petllama.network.parseHeaderLines
+import com.jimgrok.petllama.network.toUserMessage
+import com.jimgrok.petllama.network.validateBearerToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,6 +43,11 @@ class McpServersViewModel : ViewModel() {
         existingId: Long?,
         enabled: Boolean
     ): Boolean {
+        val tokenError = validateBearerToken(bearerToken)
+        if (tokenError != null) {
+            _state.update { it.copy(formError = tokenError) }
+            return false
+        }
         val headers = try {
             parseHeaderLines(headerLines)
         } catch (e: IllegalArgumentException) {
@@ -82,6 +89,7 @@ class McpServersViewModel : ViewModel() {
     }
 
     fun test(server: McpServerEntity) {
+        if (_state.value.testingId != null) return
         _state.update { it.copy(testingId = server.id, testResult = null) }
         viewModelScope.launch {
             val client = McpClient(server)
@@ -89,6 +97,9 @@ class McpServersViewModel : ViewModel() {
                 val info = client.describe()
                 val from = info.serverName?.let { " from $it" }.orEmpty()
                 "\u2705 ${info.toolCount} tool(s)$from"
+            } catch (e: CancellationException) {
+                _state.update { it.copy(testingId = null) }
+                throw e
             } catch (e: Exception) {
                 "\u274c ${e.toUserMessage()}"
             } finally {
