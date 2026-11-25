@@ -56,6 +56,12 @@ interface ConversationDao {
     @Delete
     suspend fun delete(conversation: ConversationEntity)
 
+    @Query("DELETE FROM conversations WHERE serverId = :serverId")
+    suspend fun deleteConversationsForServer(serverId: Long)
+
+    @Query("DELETE FROM messages WHERE conversationId IN (SELECT id FROM conversations WHERE serverId = :serverId)")
+    suspend fun deleteMessagesForServer(serverId: Long)
+
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesFor(conversationId: Long)
 
@@ -69,7 +75,15 @@ interface ConversationDao {
         delete(conversation)
     }
 
-    @Query("SELECT * FROM messages WHERE conversationId = :cid ORDER BY createdAt ASC")
+    /** Removes a server along with its conversations and messages. */
+    @Transaction
+    suspend fun deleteServerCascade(server: ServerEntity, serverDao: ServerDao) {
+        deleteMessagesForServer(server.id)
+        deleteConversationsForServer(server.id)
+        serverDao.delete(server)
+    }
+
+    @Query("SELECT * FROM messages WHERE conversationId = :cid ORDER BY createdAt ASC, id ASC")
     suspend fun messagesFor(cid: Long): List<MessageEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

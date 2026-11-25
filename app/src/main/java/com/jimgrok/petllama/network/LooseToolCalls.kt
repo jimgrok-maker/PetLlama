@@ -32,21 +32,29 @@ internal data class RecoveredCalls(
  * hold a JSON object. Blocks that do not parse stay in the text.
  */
 internal fun parseLooseToolCalls(text: String): LooseToolParse {
-    if (!text.contains("<tool_call", ignoreCase = true)) {
+    val tag = "<tool_call"
+    if (!text.contains(tag, ignoreCase = true)) {
         return LooseToolParse(text, emptyList())
     }
     val calls = mutableListOf<LooseToolCall>()
     val ranges = mutableListOf<IntRange>()
-    val lower = text.lowercase()
+    val closeTag = "</tool_call>"
     var cursor = 0
     while (cursor < text.length) {
-        val start = lower.indexOf("<tool_call", cursor)
+        val start = text.indexOf(tag, cursor, ignoreCase = true)
         if (start < 0) break
+        val afterTag = start + tag.length
+        if (afterTag < text.length) {
+            val ch = text[afterTag]
+            if (ch != '>' && !ch.isWhitespace()) {
+                cursor = afterTag
+                continue
+            }
+        }
         val openEnd = text.indexOf('>', start)
         if (openEnd < 0) break
-        val closeTag = "</tool_call>"
-        val close = lower.indexOf(closeTag, openEnd + 1)
-        val next = lower.indexOf("<tool_call", openEnd + 1)
+        val close = text.indexOf(closeTag, openEnd + 1, ignoreCase = true)
+        val next = nextToolCallStart(text, openEnd + 1)
         val bodyEnd: Int
         val blockEnd: Int
         if (close >= 0 && (next < 0 || close < next)) {
@@ -78,6 +86,21 @@ internal fun parseLooseToolCalls(text: String): LooseToolParse {
         if (from < text.length) append(text, from, text.length)
     }.trim()
     return LooseToolParse(prose, calls)
+}
+
+private fun nextToolCallStart(text: String, fromIndex: Int): Int {
+    val tag = "<tool_call"
+    var idx = fromIndex
+    while (idx < text.length) {
+        val found = text.indexOf(tag, idx, ignoreCase = true)
+        if (found < 0) return -1
+        val after = found + tag.length
+        if (after >= text.length || text[after] == '>' || text[after].isWhitespace()) {
+            return found
+        }
+        idx = after
+    }
+    return -1
 }
 
 /**
@@ -266,7 +289,7 @@ private val invokeNamed = Regex(
     RegexOption.IGNORE_CASE
 )
 private val parameterPattern = Regex(
-    """<parameter\s*(?:=\s*|\s+name\s*=\s*)["']?([^"'>\s]+)["']?\s*>""",
+    """<parameter\s*(?:=|\s+name\s*=)\s*["']?([^"'>\s]+)["']?\s*>""",
     RegexOption.IGNORE_CASE
 )
 private val closeTag = Regex(

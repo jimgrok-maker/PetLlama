@@ -57,7 +57,8 @@ class McpClient(
     private var sessionId: String? = null
     private var ready = false
     private var nextId = 1
-    private var streamCall: Call? = null
+    @Volatile private var closed = false
+    @Volatile private var streamCall: Call? = null
     private var serverName: String? = null
     private var protocolVersion: String? = null
 
@@ -76,13 +77,13 @@ class McpClient(
             if (!cursor.isNullOrEmpty()) params.addProperty("cursor", cursor)
             val result = rpc("tools/list", params)
                 ?: throw McpException("tools/list returned nothing")
-            val tools = result.getAsJsonArray("tools") ?: JsonArray()
+            val tools = result.get("tools")?.takeIf { it.isJsonArray }?.asJsonArray ?: JsonArray()
             for (element in tools) {
                 if (!element.isJsonObject) continue
                 val tool = parseTool(element.asJsonObject)
                 if (tool.name.isNotEmpty()) all += tool
             }
-            cursor = result.get("nextCursor")?.takeIf { !it.isJsonNull }?.asString
+            cursor = result.get("nextCursor")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
             pages++
         } while (!cursor.isNullOrEmpty() && pages < MAX_PAGES)
         all
@@ -97,12 +98,20 @@ class McpClient(
         }
         val result = rpc("tools/call", params)
             ?: throw McpException("tools/call returned nothing")
-        val text = result.getAsJsonArray("content").toText()
-        val isError = result.get("isError")?.takeIf { !it.isJsonNull }?.asBoolean == true
+        val contentArr = result.get("content")?.takeIf { it.isJsonArray }?.asJsonArray
+        var text = contentArr.toText()
+        if (text.isBlank()) {
+            val structured = result.get("structuredContent")?.takeIf { !it.isJsonNull }
+            if (structured != null) {
+                text = structured.toString()
+            }
+        }
+        val isError = result.get("isError")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean == true
         McpCallResult(text.ifBlank { if (isError) "Tool failed" else "" }, isError)
     }
 
     private suspend fun ensureReady() {
+        if (closed) throw McpException("MCP client is closed")
         if (ready) return
         val params = JsonObject().apply {
             addProperty("protocolVersion", PROTOCOL)
@@ -114,12 +123,11 @@ class McpClient(
         }
         val result = rpc("initialize", params)
             ?: throw McpException("initialize returned nothing")
-        protocolVersion = result.get("protocolVersion")?.takeIf { !it.isJsonNull }?.asString
-        serverName = result.getAsJsonObject("serverInfo")
-            ?.get("name")?.takeIf { !it.isJsonNull }?.asString
-        ready = true
-        // Notification: the server may answer 202 or 204 with an empty body.
+        protocolVersion = result.get("protocolVersion")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+        serverName = result.get("serverInfo")?.takeIf { it.isJsonObject }?.asJsonObject
+            ?.get("name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
         rpc("notifications/initialized", JsonObject(), notification = true)
+        ready = true
         // The llama.cpp web UI then opens GET so the server can push logs.
         // Some servers want that stream up before tools/list.
         openServerStream()
@@ -127,12 +135,14 @@ class McpClient(
 
     /** Stops the optional server-to-client event stream. Never touches the socket on the caller thread. */
     fun close() {
+        closed = true
         val call = streamCall
         streamCall = null
         if (call != null) cancelAwayFromCaller(call)
     }
 
     private suspend fun rpc(method: String, params: JsonElement?, notification: Boolean = false): JsonObject? {
+        if (closed) throw McpException("MCP client is closed")
         val id = if (notification) null else nextId++
         val body = JsonObject().apply {
             addProperty("jsonrpc", "2.0")
@@ -198,7 +208,7 @@ class McpClient(
      * Failure is ignored: a server may answer 405 when it does not push messages.
      */
     private suspend fun openServerStream() {
-        if (streamCall != null) return
+        if (closed || streamCall != null) return
         val call = try {
             http.newCall(
                 requestBuilder(server.url.trim()).get().header("Accept", "text/event-stream").build()
@@ -209,33 +219,43 @@ class McpClient(
             return
         }
         streamCall = call
+        if (closed) {
+            streamCall = null
+            cancelAwayFromCaller(call)
+            return
+        }
         // Headers should come back quickly. A server that ignores GET must not block tools/list.
         val response = try {
             withTimeoutOrNull(2_000) { execute(call) }
         } catch (e: CancellationException) {
+            if (streamCall === call) streamCall = null
             cancelAwayFromCaller(call)
             throw e
         } catch (_: Exception) {
+            if (streamCall === call) streamCall = null
             cancelAwayFromCaller(call)
             return
         }
         if (response == null) {
+            if (streamCall === call) streamCall = null
             cancelAwayFromCaller(call)
             return
         }
-        if (response.code == 404 || response.code == 405) {
+        if (closed || !response.isSuccessful) {
+            if (streamCall === call) streamCall = null
             closeAwayFromCaller(response)
             return
         }
         Thread {
             try {
                 val source = response.body?.source()
-                while (source != null && !source.exhausted()) {
+                while (!closed && source != null && !source.exhausted()) {
                     if (source.readUtf8Line() == null) break
                 }
             } catch (_: Exception) {
             } finally {
-                response.close()
+                if (streamCall === call) streamCall = null
+                closeAwayFromCaller(response)
             }
         }.apply {
             isDaemon = true
@@ -429,9 +449,9 @@ private fun looksLikeSse(raw: String): Boolean {
 }
 
 private fun parseTool(obj: JsonObject): McpTool {
-    val name = obj.get("name")?.takeIf { !it.isJsonNull }?.asString?.trim().orEmpty()
-    val description = obj.get("description")?.takeIf { !it.isJsonNull }?.asString
-    val schema = obj.getAsJsonObject("inputSchema") ?: JsonObject().apply {
+    val name = obj.get("name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+    val description = obj.get("description")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+    val schema = obj.get("inputSchema")?.takeIf { it.isJsonObject }?.asJsonObject ?: JsonObject().apply {
         addProperty("type", "object")
         add("properties", JsonObject())
     }
@@ -454,9 +474,9 @@ private fun JsonArray?.toText(): String {
     return joinToString("\n") { element ->
         if (!element.isJsonObject) return@joinToString element.toString()
         val obj = element.asJsonObject
-        val type = obj.get("type")?.takeIf { !it.isJsonNull }?.asString
+        val type = obj.get("type")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
         when (type) {
-            "text", null -> obj.get("text")?.takeIf { !it.isJsonNull }?.asString.orEmpty()
+            "text", null -> obj.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString.orEmpty()
             else -> obj.toString()
         }
     }.trim()

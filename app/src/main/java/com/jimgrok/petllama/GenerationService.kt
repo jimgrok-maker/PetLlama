@@ -11,6 +11,9 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Keeps the process in the foreground while a reply is streaming.
@@ -23,16 +26,17 @@ class GenerationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = notification()
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        // Always invoke startForeground() promptly so Android does not throw
+        // ForegroundServiceDidNotStartInTimeException if stop() raced ahead.
+        promoteToForeground()
+
+        val action = intent?.action
+        if (action == ACTION_STOP || (stopRequested.get() && activeCount.get() <= 0)) {
+            releaseWakeLock()
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
+
         val power = getSystemService(POWER_SERVICE) as PowerManager
         if (wakeLock == null) {
             wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PetLlama:generating")
@@ -44,10 +48,39 @@ class GenerationService : Service() {
         return START_NOT_STICKY
     }
 
+    @Suppress("Override")
+    fun onTimeout(startId: Int, fgsType: Int) {
+        activeCount.set(0)
+        stopRequested.set(true)
+        releaseWakeLock()
+        stopSelf(startId)
+    }
+
     override fun onDestroy() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseWakeLock()
         super.onDestroy()
+    }
+
+    private fun promoteToForeground() {
+        val notif = notification()
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notif,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notif)
+            }
+        } catch (_: Exception) {
+            // Avoid crashing if foreground start is disallowed by OS policy.
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) runCatching { it.release() } }
+        wakeLock = null
     }
 
     private fun notification(): Notification {
@@ -76,22 +109,38 @@ class GenerationService : Service() {
     companion object {
         private const val CHANNEL = "petllama-generating"
         private const val NOTIFICATION_ID = 41
+        internal const val ACTION_STOP = "com.jimgrok.petllama.action.STOP_GENERATION"
+        internal val activeCount = AtomicInteger(0)
+        internal val stopRequested = AtomicBoolean(false)
     }
 }
 
 object GenerationGuard {
     fun start() {
-        val app = PetLlamaApp.app
+        val app = runCatching { PetLlamaApp.app }.getOrNull() ?: return
+        GenerationService.stopRequested.set(false)
+        GenerationService.activeCount.incrementAndGet()
         val intent = Intent(app, GenerationService::class.java)
         try {
-            androidx.core.content.ContextCompat.startForegroundService(app, intent)
+            ContextCompat.startForegroundService(app, intent)
         } catch (_: Exception) {
-            // A missing notification permission must not stop the chat.
+            GenerationService.activeCount.decrementAndGet()
         }
     }
 
     fun stop() {
+        val remaining = GenerationService.activeCount.decrementAndGet()
+        if (remaining > 0) return
+        GenerationService.activeCount.set(0)
+        GenerationService.stopRequested.set(true)
         val app = runCatching { PetLlamaApp.app }.getOrNull() ?: return
-        runCatching { app.stopService(Intent(app, GenerationService::class.java)) }
+        val stopIntent = Intent(app, GenerationService::class.java).apply {
+            action = GenerationService.ACTION_STOP
+        }
+        runCatching {
+            ContextCompat.startForegroundService(app, stopIntent)
+        }.onFailure {
+            runCatching { app.stopService(Intent(app, GenerationService::class.java)) }
+        }
     }
 }

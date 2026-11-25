@@ -1,11 +1,12 @@
 package com.jimgrok.petllama.ui
 
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.data.ServerEntity
 import com.jimgrok.petllama.network.LlamaClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,7 +33,7 @@ class ServersViewModel : ViewModel() {
 
     fun save(name: String, url: String, apiKey: String, contextLength: Int?, existingId: Long?) {
         viewModelScope.launch {
-            val id = if (existingId == null) 0L else existingId
+            val id = existingId ?: 0L
             Db.servers.upsert(
                 ServerEntity(
                     id = id,
@@ -46,13 +47,31 @@ class ServersViewModel : ViewModel() {
     }
 
     fun delete(server: ServerEntity) {
-        viewModelScope.launch { Db.servers.delete(server) }
+        viewModelScope.launch(Dispatchers.IO) {
+            Db.conversations.deleteServerCascade(server, Db.servers)
+            _state.update { st ->
+                if (st.testResult?.first == server.id) st.copy(testResult = null) else st
+            }
+        }
     }
 
     fun test(server: ServerEntity) {
-        _state.update { it.copy(testingId = server.id) }
-        LlamaClient.testServer(server) { ok, msg ->
-            _state.update { it.copy(testingId = null, testResult = server.id to (if (ok) "\u2705 $msg" else "\u274c $msg")) }
+        if (_state.value.testingId != null) return
+        _state.update { it.copy(testingId = server.id, testResult = null) }
+        viewModelScope.launch {
+            try {
+                LlamaClient.testServer(server) { ok, msg ->
+                    _state.update {
+                        it.copy(
+                            testingId = null,
+                            testResult = server.id to (if (ok) "✅ $msg" else "❌ $msg")
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(testingId = null) }
+                throw e
+            }
         }
     }
 
