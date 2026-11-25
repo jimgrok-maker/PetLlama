@@ -1,6 +1,5 @@
 package com.jimgrok.petllama.network
 
-import com.google.gson.annotations.SerializedName
 import com.jimgrok.petllama.data.McpServerEntity
 
 /** A tool the model is allowed to call, with a name that is unique across servers. */
