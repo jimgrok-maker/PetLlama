@@ -48,7 +48,7 @@ class ServersViewModel : ViewModel() {
 
     fun delete(server: ServerEntity) {
         viewModelScope.launch(Dispatchers.IO) {
-            Db.conversations.deleteServerCascade(server, Db.servers)
+            Db.conversations.deleteServerCascade(server.id)
             _state.update { st ->
                 if (st.testResult?.first == server.id) st.copy(testResult = null) else st
             }

@@ -62,6 +62,9 @@ interface ConversationDao {
     @Query("DELETE FROM messages WHERE conversationId IN (SELECT id FROM conversations WHERE serverId = :serverId)")
     suspend fun deleteMessagesForServer(serverId: Long)
 
+    @Query("DELETE FROM servers WHERE id = :serverId")
+    suspend fun deleteServerRow(serverId: Long)
+
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesFor(conversationId: Long)
 
@@ -77,10 +80,10 @@ interface ConversationDao {
 
     /** Removes a server along with its conversations and messages. */
     @Transaction
-    suspend fun deleteServerCascade(server: ServerEntity, serverDao: ServerDao) {
-        deleteMessagesForServer(server.id)
-        deleteConversationsForServer(server.id)
-        serverDao.delete(server)
+    suspend fun deleteServerCascade(serverId: Long) {
+        deleteMessagesForServer(serverId)
+        deleteConversationsForServer(serverId)
+        deleteServerRow(serverId)
     }
 
     @Query("SELECT * FROM messages WHERE conversationId = :cid ORDER BY createdAt ASC, id ASC")
