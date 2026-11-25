@@ -283,7 +283,7 @@ class McpClient(
             builder.header(header.name, header.value)
         }
         sessionId?.let { builder.header("Mcp-Session-Id", it) }
-        if (ready) builder.header("MCP-Protocol-Version", protocolVersion ?: PROTOCOL)
+        if (ready || protocolVersion != null) builder.header("MCP-Protocol-Version", protocolVersion ?: PROTOCOL)
         return builder
     }
 

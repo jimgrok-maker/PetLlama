@@ -3,6 +3,7 @@ package com.jimgrok.petllama.data
 import android.content.Context
 import androidx.room.Room
 import androidx.room.migration.Migration
+import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 object Db {
@@ -51,6 +52,15 @@ object Db {
             .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .fallbackToDestructiveMigration()
             .build()
+    }
+
+    /** Removes a server along with its conversations and messages in one transaction. */
+    suspend fun deleteServerCascade(server: ServerEntity) {
+        db.withTransaction {
+            db.conversationDao().deleteMessagesForServer(server.id)
+            db.conversationDao().deleteConversationsForServer(server.id)
+            db.serverDao().delete(server)
+        }
     }
 
     val servers: ServerDao get() = db.serverDao()
