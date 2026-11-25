@@ -16,6 +16,14 @@ class MessageTextTest {
     }
 
     @Test
+    fun orphanClosingThinkTagSplitsPrefilledReasoning() {
+        val split = extractThinkTags("prefilled thought\n</think>\n\nFinal answer.")
+        assertEquals("prefilled thought", split.reasoning)
+        assertEquals("Final answer.", split.answer)
+        assertFalse(split.stillThinking)
+    }
+
+    @Test
     fun unclosedThinkTagStaysInProgress() {
         val split = extractThinkTags("Hello <think>still working")
         assertEquals("still working", split.reasoning)
@@ -39,5 +47,15 @@ class MessageTextTest {
         assertEquals("kotlin", code.language)
         assertEquals("val n = 1", code.code)
         assertEquals("Done", (blocks[2] as MarkdownBlock.Prose).markdown)
+    }
+
+    @Test
+    fun fourBacktickFenceContainsTripleBacktickExample() {
+        val markdown = "````markdown\n```kotlin\nval x = 1\n```\n````"
+        val blocks = splitFencedCode(markdown)
+        assertEquals(1, blocks.size)
+        val code = blocks.single() as MarkdownBlock.Code
+        assertEquals("markdown", code.language)
+        assertTrue(code.code.contains("```kotlin"))
     }
 }

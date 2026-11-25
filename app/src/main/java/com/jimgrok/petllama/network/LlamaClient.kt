@@ -5,11 +5,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -31,23 +30,29 @@ import kotlin.coroutines.resumeWithException
  */
 class LlamaClient(private val server: ServerEntity) {
 
-    private val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .build()
+    private val client: OkHttpClient = defaultClient
+
+    private fun baseUrl(): String {
+        val trimmed = server.url.trim().trimEnd('/')
+        return if (trimmed.endsWith("/v1", ignoreCase = true) && trimmed.length > 3) {
+            trimmed.dropLast(3).trimEnd('/')
+        } else {
+            trimmed
+        }
     }
 
-    private fun baseUrl(): String = server.url.trim().trimEnd('/')
-
-    /** GET /health → true if the server answers with a success status. */
+    /** GET /health -> true if the server answers with a success status. */
     suspend fun health(): Boolean = suspendCancellableCoroutine { cont ->
-        val call = client.newCall(
+        val req = try {
             Request.Builder()
                 .url(endpoint(baseUrl(), "/health"))
                 .withApiKey(server.apiKey)
                 .build()
-        )
+        } catch (_: IllegalArgumentException) {
+            cont.resumeIfActive(false)
+            return@suspendCancellableCoroutine
+        }
+        val call = client.newCall(req)
         cont.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -60,14 +65,18 @@ class LlamaClient(private val server: ServerEntity) {
         })
     }
 
-    /** GET /v1/models → list of loaded model ids. */
+    /** GET /v1/models -> list of loaded model ids. */
     suspend fun listModels(): List<ModelInfo> = suspendCancellableCoroutine { cont ->
-        val call = client.newCall(
+        val req = try {
             Request.Builder()
                 .url(endpoint(baseUrl(), "/v1/models"))
                 .withApiKey(server.apiKey)
                 .build()
-        )
+        } catch (e: IllegalArgumentException) {
+            cont.resumeIfActiveWith(Result.failure(e))
+            return@suspendCancellableCoroutine
+        }
+        val call = client.newCall(req)
         cont.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -99,7 +108,7 @@ class LlamaClient(private val server: ServerEntity) {
 
     /**
      * POST /v1/chat/completions with stream=true.
-     * Emits each assistant token (content delta) as it arrives.
+     * Emits each streamed completion event as it arrives.
      * Completes when the stream ends (data: [DONE] or the connection closes).
      * Failures close the flow with an error so the collector can show it.
      * Cancelling the collector cancels the HTTP call and ends the flow quietly.
@@ -107,12 +116,16 @@ class LlamaClient(private val server: ServerEntity) {
     fun streamChat(request: ChatRequest): Flow<StreamEvent> = callbackFlow {
         val json = GsonHolder.gson.toJson(request)
         val body = json.toRequestBody("application/json".toMediaType())
-        val req = Request.Builder()
-            .url(endpoint(baseUrl(), "/v1/chat/completions"))
-            .withApiKey(server.apiKey)
-            .post(body)
-            .build()
-        // No read timeout: a local model can pause between tokens for longer than a normal HTTP read.
+        val req = try {
+            Request.Builder()
+                .url(endpoint(baseUrl(), "/v1/chat/completions"))
+                .withApiKey(server.apiKey)
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            close(e)
+            return@callbackFlow
+        }
         // No read, write, or whole-call timeout. A local model can sit silent for a
         // long time while it reads a big tool result before the first token.
         val call = client.newBuilder()
@@ -191,12 +204,15 @@ class LlamaClient(private val server: ServerEntity) {
     }
 
     private fun getQuiet(path: String): String? {
-        val call = client.newCall(
+        val req = try {
             Request.Builder()
                 .url(endpoint(baseUrl(), path))
                 .withApiKey(server.apiKey)
                 .build()
-        )
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        val call = client.newCall(req)
         return try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) null else resp.body?.string()
@@ -207,10 +223,23 @@ class LlamaClient(private val server: ServerEntity) {
     }
 
     companion object {
+        private val defaultClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+        }
+
         /** Quick connect test used by the server list. Reports how many models loaded. */
         fun testServer(server: ServerEntity, onResult: (Boolean, String) -> Unit) {
+            val trimmed = server.url.trim().trimEnd('/')
+            val root = if (trimmed.endsWith("/v1", ignoreCase = true) && trimmed.length > 3) {
+                trimmed.dropLast(3).trimEnd('/')
+            } else {
+                trimmed
+            }
             val url = try {
-                endpoint(server.url, "/v1/models")
+                endpoint(root, "/v1/models")
             } catch (e: IllegalArgumentException) {
                 onResult(false, "Bad URL: ${e.message}")
                 return
@@ -221,11 +250,11 @@ class LlamaClient(private val server: ServerEntity) {
                 onResult(false, "Bad URL: ${e.message}")
                 return
             }
-            val client = OkHttpClient.Builder()
+            val probeClient = defaultClient.newBuilder()
                 .connectTimeout(6, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()
-            client.newCall(request).enqueue(object : Callback {
+            probeClient.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     onResult(false, "Unreachable: ${e.message}")
                 }
@@ -236,10 +265,7 @@ class LlamaClient(private val server: ServerEntity) {
                             onResult(false, "HTTP ${resp.code}")
                         } else {
                             val body = resp.body?.string().orEmpty()
-                            val n = runCatching {
-                                GsonHolder.gson.fromJson(body, ModelListResponse::class.java)
-                                    ?.data?.size ?: 0
-                            }.getOrDefault(0)
+                            val n = runCatching { modelsFromJson(body).size }.getOrDefault(0)
                             onResult(true, "$n model(s) loaded")
                         }
                     }
@@ -256,7 +282,7 @@ private fun endpoint(base: String, path: String): String {
 }
 
 private fun Request.Builder.withApiKey(apiKey: String): Request.Builder = apply {
-    if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey")
+    if (apiKey.isNotBlank()) header("Authorization", "Bearer ${apiKey.trim()}")
 }
 
 private fun <T> Continuation<T>.resumeIfActive(value: T) {

@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -83,6 +85,7 @@ fun ServersScreen(
                     server = server,
                     testResult = state.testResult?.second?.takeIf { state.testResult?.first == server.id },
                     isTesting = state.testingId == server.id,
+                    anyTesting = state.testingId != null,
                     onOpen = { onOpenChat(server.id) },
                     onEdit = { editing = server },
                     onDelete = { viewModel.delete(server) },
@@ -137,6 +140,7 @@ fun ServerCard(
     server: ServerEntity,
     testResult: String?,
     isTesting: Boolean,
+    anyTesting: Boolean = false,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -158,7 +162,7 @@ fun ServerCard(
             }
             Spacer(Modifier.height(8.dp))
             Row {
-                OutlinedButton(onClick = onTest, enabled = !isTesting) {
+                OutlinedButton(onClick = onTest, enabled = !isTesting && !anyTesting) {
                     Icon(Icons.Default.Refresh, null)
                     Spacer(Modifier.padding(horizontal = 4.dp))
                     Text(if (isTesting) "Testing\u2026" else "Test")
@@ -185,10 +189,15 @@ fun ServerEditSheet(
     var key by remember { mutableStateOf(initialKey) }
     var context by remember { mutableStateOf(initialContext) }
 
-    val sheetState = rememberModalBottomSheetState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(modifier = Modifier.padding(24.dp).padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(
+            modifier = Modifier
+                .padding(24.dp)
+                .padding(bottom = 32.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Text(title, style = MaterialTheme.typography.titleLarge)
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())

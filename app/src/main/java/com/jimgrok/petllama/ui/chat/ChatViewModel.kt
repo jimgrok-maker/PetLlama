@@ -1,5 +1,6 @@
 package com.jimgrok.petllama.ui.chat
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jimgrok.petllama.GenerationGuard
@@ -38,7 +39,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** A message with a flag marking it as the live-streaming bubble (id not yet persisted). */
 data class UiMessage(
     val id: Long,
     val role: String,
@@ -61,6 +61,7 @@ class ChatViewModel : ViewModel() {
         val error: String? = null,
         val conversations: List<ConversationEntity> = emptyList(),
         val activeConversationId: Long? = null,
+        // params
         val temperature: Float = 0.7f,
         val topP: Float = 0.95f,
         val maxTokens: Int = 512,
@@ -79,10 +80,10 @@ class ChatViewModel : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
     /**
      * Sends are not tied to the screen loader. Cancelling a /props read or
-     * reloading models must not cancel MCP initialize. [stop] applies only
-     * after that handshake, once the model request itself has started.
+     * reloading models must not cancel MCP initialize.
      */
     private val generationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var streamJob: Job? = null
@@ -91,10 +92,12 @@ class ChatViewModel : ViewModel() {
     private var nextTempId = -1L
     private val liveSpeed = LiveTokenSpeed()
     private var contextLoadedFor: Long? = null
+
     /** n_ctx from /props or /slots. Null on backends that do not have those. */
     private var propsContext: Int? = null
-    /** Stop is ignored until the model request itself has started. */
-    private var acceptStop = false
+
+    /** Brief guard (ms) after Send starts so a stray tap on the swapping button does not abort immediately. */
+    private var stopAllowedAtElapsedMs: Long = 0L
 
     fun init(serverId: Long) {
         // The screen calls this again after rotation or returning from ServersScreen.
@@ -132,9 +135,14 @@ class ChatViewModel : ViewModel() {
             try {
                 val models = LlamaClient(server).listModels()
                 _state.update { s ->
+                    val chosen = if (s.selectedModel.isNotEmpty() && models.any { it.id == s.selectedModel }) {
+                        s.selectedModel
+                    } else {
+                        models.firstOrNull()?.id ?: ""
+                    }
                     s.copy(
                         models = models,
-                        selectedModel = s.selectedModel.ifEmpty { models.firstOrNull()?.id ?: "" },
+                        selectedModel = chosen,
                         error = if (s.error?.startsWith("Failed to load models") == true) null else s.error
                     )
                 }
@@ -149,7 +157,7 @@ class ChatViewModel : ViewModel() {
             }
         }
         // /props can block. It is its own job so cancelling it cannot cancel a send,
-        // and runCatching must not swallow that cancellation into the model loader.
+        // and cancellation must not be swallowed into the model loader.
         propsJob = viewModelScope.launch {
             if (contextLoadedFor == serverId) return@launch
             val server = Db.servers.getById(serverId) ?: return@launch
@@ -180,15 +188,19 @@ class ChatViewModel : ViewModel() {
     }
 
     fun newConversation() {
+        streamJob?.cancel()
         viewModelScope.launch {
             val serverId = _state.value.server?.id ?: return@launch
-            val id = Db.conversations.insert(
-                ConversationEntity(serverId = serverId, model = _state.value.selectedModel)
-            )
+            val id = withContext(Dispatchers.IO) {
+                Db.conversations.insert(
+                    ConversationEntity(serverId = serverId, model = _state.value.selectedModel)
+                )
+            }
             _state.update {
                 it.copy(
                     activeConversationId = id,
                     messages = emptyList(),
+                    streaming = false,
                     error = null,
                     toolNotice = null,
                     usedTokens = null,
@@ -201,8 +213,9 @@ class ChatViewModel : ViewModel() {
     }
 
     fun openConversation(id: Long) {
+        streamJob?.cancel()
         viewModelScope.launch {
-            val msgs = Db.conversations.messagesFor(id)
+            val msgs = withContext(Dispatchers.IO) { Db.conversations.messagesFor(id) }
             _state.update {
                 it.copy(
                     activeConversationId = id,
@@ -217,6 +230,7 @@ class ChatViewModel : ViewModel() {
                             toolError = m.toolError
                         )
                     },
+                    streaming = false,
                     error = null,
                     toolNotice = null,
                     usedTokens = null,
@@ -229,14 +243,19 @@ class ChatViewModel : ViewModel() {
     }
 
     fun deleteConversation(id: Long) {
+        val deletingActive = _state.value.activeConversationId == id
+        if (deletingActive) {
+            streamJob?.cancel()
+        }
         viewModelScope.launch {
-            val conv = Db.conversations.getById(id) ?: return@launch
-            Db.conversations.deleteConversation(conv)
+            val conv = withContext(Dispatchers.IO) { Db.conversations.getById(id) } ?: return@launch
+            withContext(Dispatchers.IO) { Db.conversations.deleteConversation(conv) }
             if (_state.value.activeConversationId == id) {
                 _state.update {
                     it.copy(
                         activeConversationId = null,
                         messages = emptyList(),
+                        streaming = false,
                         toolNotice = null,
                         usedTokens = null,
                         tokensPerSecond = null,
@@ -261,10 +280,17 @@ class ChatViewModel : ViewModel() {
     fun editAndResend(messageId: Long, newText: String) {
         if (newText.isBlank() || _state.value.streaming) return
         val convId = _state.value.activeConversationId ?: return
+        _state.update { st ->
+            st.copy(
+                streaming = true,
+                error = null,
+                toolNotice = null,
+                messages = st.messages.filter { it.id < messageId }
+            )
+        }
         viewModelScope.launch {
             withContext(Dispatchers.IO) { Db.conversations.deleteMessagesFrom(convId, messageId) }
-            _state.update { st -> st.copy(messages = st.messages.filter { it.id < messageId }) }
-            send(newText)
+            launchSendJob(newText, reuseExistingUser = false, presetConvId = convId)
         }
     }
 
@@ -274,12 +300,19 @@ class ChatViewModel : ViewModel() {
         val messages = _state.value.messages
         val lastUser = messages.lastOrNull { it.role == "user" && it.id >= 0 } ?: return
         val convId = _state.value.activeConversationId ?: return
+        _state.update { st ->
+            st.copy(
+                streaming = true,
+                error = null,
+                toolNotice = null,
+                messages = st.messages.filter { it.id <= lastUser.id }
+            )
+        }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 Db.conversations.deleteMessagesFrom(convId, lastUser.id + 1)
             }
-            _state.update { st -> st.copy(messages = st.messages.filter { it.id <= lastUser.id }) }
-            beginSend(lastUser.content, reuseExistingUser = true)
+            launchSendJob(lastUser.content, reuseExistingUser = true, presetConvId = convId)
         }
     }
 
@@ -289,9 +322,7 @@ class ChatViewModel : ViewModel() {
     }
 
     fun stop() {
-        // Tool discovery is not the model call. A tap that lands on Stop while
-        // the send button is swapping must not cancel GitHub initialize.
-        if (!acceptStop) return
+        if (SystemClock.elapsedRealtime() < stopAllowedAtElapsedMs) return
         streamJob?.cancel()
     }
 
@@ -317,8 +348,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private fun appendAssistantChunk(chunk: String) {
+    private fun appendAssistantChunk(convId: Long, chunk: String) {
         _state.update { st ->
+            if (st.activeConversationId != convId) return@update st
             val list = st.messages.toMutableList()
             val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
             if (idx >= 0) {
@@ -333,10 +365,6 @@ class ChatViewModel : ViewModel() {
     private suspend fun finishAssistantBubble(convId: Long) {
         val streaming = _state.value.messages.lastOrNull { it.isStreaming && it.role == "assistant" }
             ?: return
-        if (streaming.content.isBlank() && streaming.reasoning.isNullOrBlank()) {
-            _state.update { st -> st.copy(messages = st.messages.filterNot { it.id == streaming.id }) }
-            return
-        }
         val split = extractThinkTags(streaming.content)
         val reasoning = listOfNotNull(streaming.reasoning, split.reasoning.takeIf { it.isNotEmpty() })
             .joinToString("\n\n")
@@ -370,8 +398,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private fun replaceAssistantContent(text: String) {
+    private fun replaceAssistantContent(convId: Long, text: String) {
         _state.update { st ->
+            if (st.activeConversationId != convId) return@update st
             val list = st.messages.toMutableList()
             val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
             if (idx >= 0) list[idx] = list[idx].copy(content = text)
@@ -379,8 +408,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private fun replaceAssistantReasoning(text: String) {
+    private fun replaceAssistantReasoning(convId: Long, text: String) {
         _state.update { st ->
+            if (st.activeConversationId != convId) return@update st
             val list = st.messages.toMutableList()
             val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
             if (idx >= 0) list[idx] = list[idx].copy(reasoning = text.ifBlank { null })
@@ -388,8 +418,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private fun appendReasoning(chunk: String) {
+    private fun appendReasoning(convId: Long, chunk: String) {
         _state.update { st ->
+            if (st.activeConversationId != convId) return@update st
             val list = st.messages.toMutableList()
             val idx = list.indexOfLast { it.isStreaming && it.role == "assistant" }
             if (idx >= 0) {
@@ -424,25 +455,39 @@ class ChatViewModel : ViewModel() {
         return catalog.takeIf { it.tools.isNotEmpty() }
     }
 
-    fun send(text: String) = beginSend(text, reuseExistingUser = false)
-
-    private fun beginSend(text: String, reuseExistingUser: Boolean) {
+    fun send(text: String) {
         if (text.isBlank() || _state.value.streaming) return
+        _state.update { it.copy(streaming = true, error = null, toolNotice = null) }
+        launchSendJob(text, reuseExistingUser = false, presetConvId = _state.value.activeConversationId)
+    }
+
+    private fun launchSendJob(
+        text: String,
+        reuseExistingUser: Boolean,
+        presetConvId: Long?
+    ) {
         val s = _state.value
-        val server = s.server ?: return
+        val server = s.server
+        if (server == null) {
+            _state.update { it.copy(streaming = false) }
+            return
+        }
         val model = s.selectedModel.ifEmpty { s.models.firstOrNull()?.id }
         if (model == null) {
-            _state.update { it.copy(error = "No model loaded on this server.") }
+            _state.update { it.copy(streaming = false, error = "No model loaded on this server.") }
             return
         }
 
-        acceptStop = false
+        stopAllowedAtElapsedMs = SystemClock.elapsedRealtime() + 300L
+        streamJob?.cancel()
         streamJob = generationScope.launch {
-            val convId = s.activeConversationId ?: withContext(Dispatchers.IO) {
+            val convId = presetConvId ?: withContext(Dispatchers.IO) {
                 val id = Db.conversations.insert(
                     ConversationEntity(serverId = server.id, model = model)
                 )
-                _state.update { it.copy(activeConversationId = id) }
+                _state.update { st ->
+                    if (st.activeConversationId == null) st.copy(activeConversationId = id) else st
+                }
                 id
             }
 
@@ -450,15 +495,13 @@ class ChatViewModel : ViewModel() {
                 val userMsg = MessageEntity(conversationId = convId, role = "user", content = text)
                 val mid = persistMessage(userMsg)
                 _state.update { st ->
-                    st.copy(
-                        messages = st.messages + UiMessage(mid, "user", text),
-                        streaming = true,
-                        error = null,
-                        toolNotice = null
-                    )
+                    val nextMsgs = if (st.activeConversationId == convId) {
+                        st.messages + UiMessage(mid, "user", text)
+                    } else {
+                        st.messages
+                    }
+                    st.copy(messages = nextMsgs)
                 }
-            } else {
-                _state.update { it.copy(streaming = true, error = null, toolNotice = null) }
             }
 
             val messages = outgoingMessages(_state.value.messages, s.systemPrompt).toMutableList()
@@ -471,7 +514,6 @@ class ChatViewModel : ViewModel() {
                 liveSpeed.reset()
                 _state.update { it.copy(speedLive = true, tokensPerSecond = null, promptPerSecond = null) }
                 val catalog = if (s.toolsEnabled) loadCatalog(sessions) else null
-                acceptStop = true
                 GenerationGuard.start()
                 val loop = runToolLoop(
                     llama = client,
@@ -494,7 +536,7 @@ class ChatViewModel : ViewModel() {
                         mcp.callTool(exposed.tool.name, args)
                     },
                     onContent = { chunk ->
-                        appendAssistantChunk(chunk)
+                        appendAssistantChunk(convId, chunk)
                         val speed = liveSpeed.onContentDelta()
                         if (speed != null) {
                             _state.update { st ->
@@ -502,10 +544,10 @@ class ChatViewModel : ViewModel() {
                             }
                         }
                     },
-                    onContentRevised = { revised -> replaceAssistantContent(revised) },
+                    onContentRevised = { revised -> replaceAssistantContent(convId, revised) },
                     onMetrics = { stats -> applyServerStats(stats) },
-                    onReasoning = { chunk -> appendReasoning(chunk) },
-                    onReasoningRevised = { revised -> replaceAssistantReasoning(revised) },
+                    onReasoning = { chunk -> appendReasoning(convId, chunk) },
+                    onReasoningRevised = { revised -> replaceAssistantReasoning(convId, revised) },
                     onRoundDone = {
                         finishAssistantBubble(convId)
                         liveSpeed.reset()
@@ -515,6 +557,7 @@ class ChatViewModel : ViewModel() {
                         val id = tempId()
                         toolBubbleId = id
                         _state.update { st ->
+                            if (st.activeConversationId != convId) return@update st
                             st.copy(
                                 messages = st.messages + UiMessage(
                                     id = id,
@@ -540,6 +583,7 @@ class ChatViewModel : ViewModel() {
                             )
                         )
                         _state.update { st ->
+                            if (st.activeConversationId != convId) return@update st
                             val list = st.messages.toMutableList()
                             val idx = list.indexOfLast { it.id == id }
                             val bubble = UiMessage(
@@ -564,12 +608,11 @@ class ChatViewModel : ViewModel() {
                         )
                     }
                 }
-            } catch (e: CancellationException) {
+            } catch (_: CancellationException) {
                 // stop pressed — keep partial text and finished tool bubbles
             } catch (e: Exception) {
                 error = e.toUserMessage()
             } finally {
-                acceptStop = false
                 sessions.values.forEach { runCatching { it.close() } }
                 GenerationGuard.stop()
                 withContext(NonCancellable) {
@@ -578,6 +621,7 @@ class ChatViewModel : ViewModel() {
                         st.copy(
                             messages = st.messages.filterNot { it.isStreaming && it.role == "tool" && it.content == "Running…" },
                             streaming = false,
+                            speedLive = false,
                             error = error ?: st.error
                         )
                     }

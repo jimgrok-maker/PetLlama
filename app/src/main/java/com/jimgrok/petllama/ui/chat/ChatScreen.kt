@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -53,6 +54,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -104,6 +106,9 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboardContext = LocalContext.current
+    val markwon = remember(clipboardContext) {
+        Markwon.builder(clipboardContext).usePlugin(TablePlugin.create(clipboardContext)).build()
+    }
 
     // auto-scroll to bottom on new messages
     LaunchedEffect(state.messages.size) {
@@ -267,6 +272,7 @@ fun ChatScreen(
                                     content = msg.content,
                                     reasoning = msg.reasoning,
                                     isStreaming = msg.isStreaming,
+                                    markwon = markwon,
                                     onLongClick = { menuMessageId = msg.id }
                                 )
                             }
@@ -305,22 +311,6 @@ fun ChatScreen(
         }
     }
 
-    if (showParams) {
-        ParamsSheet(
-            temperature = state.temperature,
-            topP = state.topP,
-            maxTokens = state.maxTokens,
-            maxToolCalls = state.maxToolCalls,
-            systemPrompt = state.systemPrompt,
-            onTemperature = vm::setTemperature,
-            onTopP = vm::setTopP,
-            onMaxTokens = vm::setMaxTokens,
-            onMaxToolCalls = vm::setMaxToolCalls,
-            onSystemPrompt = vm::setSystemPrompt,
-            onDismiss = { showParams = false }
-        )
-    }
-
     editing?.let { msg ->
         var draft by remember(msg.id) { mutableStateOf(msg.content) }
         AlertDialog(
@@ -336,6 +326,22 @@ fun ChatScreen(
                 }) { Text("Resend") }
             },
             dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } }
+        )
+    }
+
+    if (showParams) {
+        ParamsSheet(
+            temperature = state.temperature,
+            topP = state.topP,
+            maxTokens = state.maxTokens,
+            maxToolCalls = state.maxToolCalls,
+            systemPrompt = state.systemPrompt,
+            onTemperature = vm::setTemperature,
+            onTopP = vm::setTopP,
+            onMaxTokens = vm::setMaxTokens,
+            onMaxToolCalls = vm::setMaxToolCalls,
+            onSystemPrompt = vm::setSystemPrompt,
+            onDismiss = { showParams = false }
         )
     }
 
@@ -371,9 +377,22 @@ fun ToolTraceBubble(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             when {
-                running -> CircularProgressIndicator(modifier = Modifier.height(14.dp).padding(end = 6.dp), strokeWidth = 2.dp)
-                failed -> Icon(Icons.Default.Error, contentDescription = "Failed", tint = MaterialTheme.colorScheme.error, modifier = Modifier.padding(end = 6.dp))
-                else -> Icon(Icons.Default.Check, contentDescription = "Done", tint = Color(0xFF3DDC84), modifier = Modifier.padding(end = 6.dp))
+                running -> CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 6.dp).size(14.dp),
+                    strokeWidth = 2.dp
+                )
+                failed -> Icon(
+                    Icons.Default.Error,
+                    contentDescription = "Failed",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(end = 6.dp).size(16.dp)
+                )
+                else -> Icon(
+                    Icons.Default.Check,
+                    contentDescription = "Done",
+                    tint = Color(0xFF3DDC84),
+                    modifier = Modifier.padding(end = 6.dp).size(16.dp)
+                )
             }
             Text(
                 name,
@@ -477,6 +496,7 @@ fun MessageBubble(
     content: String,
     reasoning: String?,
     isStreaming: Boolean,
+    markwon: Markwon? = null,
     onLongClick: () -> Unit
 ) {
     val isUser = role == "user"
@@ -503,10 +523,10 @@ fun MessageBubble(
             }
             val answer = if (isUser) content else split.answer
             if (answer.isNotEmpty()) {
-                if (isUser) {
+                if (isUser || isStreaming) {
                     Text(answer, style = MaterialTheme.typography.bodyLarge, color = fg)
                 } else {
-                    MarkdownAnswer(answer, fg)
+                    MarkdownAnswer(answer, fg, markwon)
                 }
             } else if (isStreaming && thought.isEmpty()) {
                 Text("\u2026", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -531,10 +551,10 @@ private fun ThinkingBlock(text: String, active: Boolean) {
 }
 
 @Composable
-private fun MarkdownAnswer(markdown: String, color: Color) {
+private fun MarkdownAnswer(markdown: String, color: Color, sharedMarkwon: Markwon? = null) {
     val blocks = remember(markdown) { splitFencedCode(markdown) }
     val context = LocalContext.current
-    val markwon = remember(context) {
+    val markwon = sharedMarkwon ?: remember(context) {
         Markwon.builder(context).usePlugin(TablePlugin.create(context)).build()
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
