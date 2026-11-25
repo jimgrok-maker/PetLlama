@@ -39,7 +39,10 @@ jobs:
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
           "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_ROOT" "platforms;android-34" "build-tools;34.0.0"
-
+          
+      - name: Run unit tests
+        run: chmod +x ./gradlew && ./gradlew testDebugUnitTest --stacktrace
+     
       - name: Build debug APK
         run: chmod +x ./gradlew && ./gradlew assembleDebug --stacktrace
 
