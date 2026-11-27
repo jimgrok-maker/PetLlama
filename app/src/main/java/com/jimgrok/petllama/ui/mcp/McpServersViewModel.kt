@@ -76,6 +76,7 @@ class McpServersViewModel : ViewModel() {
      */
     fun addPreset(preset: McpPreset, url: String): Boolean {
         val server = preset.serverFor(url) ?: return false
+        if (preset.isAlreadySaved(_state.value.servers)) return false
         viewModelScope.launch { Db.mcp.upsert(server.copy(id = 0, enabled = false)) }
         return true
     }

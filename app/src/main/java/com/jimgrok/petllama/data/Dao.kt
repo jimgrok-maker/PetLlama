@@ -26,6 +26,9 @@ interface McpServerDao {
     @Query("SELECT * FROM mcp_servers WHERE enabled = 1 ORDER BY id ASC")
     suspend fun listEnabled(): List<McpServerEntity>
 
+    @Query("SELECT COUNT(*) FROM mcp_servers")
+    suspend fun count(): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(server: McpServerEntity): Long
 
