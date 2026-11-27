@@ -62,7 +62,10 @@ data class ChatRequest(
     @SerializedName("temperature") val temperature: Float? = null,
     @SerializedName("top_p") val topP: Float? = null,
     @SerializedName("max_tokens") val maxTokens: Int? = null,
-    @SerializedName("tools") val tools: List<ToolSpec>? = null
+    @SerializedName("tools") val tools: List<ToolSpec>? = null,
+    /** Omitted when null so Default stays identical to a request without this field. */
+    @SerializedName("reasoning_effort") val reasoningEffort: String? = null,
+    @SerializedName("chat_template_kwargs") val chatTemplateKwargs: com.google.gson.JsonObject? = null
 )
 
 /** OpenAI-style tool definition. [parameters] is the MCP tool's input schema. */

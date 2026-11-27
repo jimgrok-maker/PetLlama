@@ -194,6 +194,15 @@ class LlamaClient(private val server: ServerEntity) {
         pickModelContextLength(modelsFromJson(models), modelId)
     }
 
+    /** Raw llama-server /props, used for n_ctx and the chat template. */
+    suspend fun propsJson(): String? = withContext(Dispatchers.IO) { getQuiet("/props") }
+
+    /** n_ctx from /slots when /props did not include it. */
+    suspend fun slotsContext(): Int? = withContext(Dispatchers.IO) {
+        val slots = getQuiet("/slots") ?: return@withContext null
+        parseContextSize(slots)
+    }
+
     /** n_ctx from llama-server only. Null when this backend has no /props or /slots. */
     suspend fun propsOrSlotsContext(): Int? = withContext(Dispatchers.IO) {
         val props = getQuiet("/props")
