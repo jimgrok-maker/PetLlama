@@ -100,6 +100,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.jimgrok.petllama.network.ContextBand
+import com.jimgrok.petllama.network.ReasoningChoice
 import com.jimgrok.petllama.network.contextFill
 import com.jimgrok.petllama.network.formatSpeed
 import com.jimgrok.petllama.network.formatTokenCount
@@ -422,9 +423,12 @@ fun ChatScreen(
             maxTokens = state.maxTokens,
             maxToolCalls = state.maxToolCalls,
             systemPrompt = state.systemPrompt,
+            reasoningLevel = state.reasoningLevel,
+            reasoningChoices = state.reasoningChoices,
             onTemperature = vm::setTemperature,
             onTopP = vm::setTopP,
             onMaxTokens = vm::setMaxTokens,
+            onReasoningLevel = vm::setReasoningLevel,
             onMaxToolCalls = vm::setMaxToolCalls,
             onSystemPrompt = vm::setSystemPrompt,
             onDismiss = { showParams = false }
@@ -1142,9 +1146,12 @@ fun ParamsSheet(
     maxTokens: Int?,
     maxToolCalls: Int,
     systemPrompt: String,
+    reasoningLevel: String,
+    reasoningChoices: List<ReasoningChoice>,
     onTemperature: (Float) -> Unit,
     onTopP: (Float) -> Unit,
     onMaxTokens: (Int?) -> Unit,
+    onReasoningLevel: (String) -> Unit,
     onMaxToolCalls: (Int) -> Unit,
     onSystemPrompt: (String) -> Unit,
     onDismiss: () -> Unit
@@ -1154,6 +1161,8 @@ fun ParamsSheet(
     var maxTok by remember { mutableStateOf(maxTokens?.toString().orEmpty()) }
     var maxTools by remember { mutableStateOf(maxToolCalls.toString()) }
     var sys by remember { mutableStateOf(systemPrompt) }
+    var reasoning by remember(reasoningLevel) { mutableStateOf(reasoningLevel) }
+    var reasoningMenu by remember { mutableStateOf(false) }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -1170,6 +1179,40 @@ fun ParamsSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Chat parameters", style = MaterialTheme.typography.titleLarge)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Reasoning", style = MaterialTheme.typography.bodyMedium, color = PetLlamaColors.TextSecondary)
+                Box {
+                    val current = reasoningChoices.firstOrNull { it.id == reasoning }?.label ?: "Default"
+                    TextButton(onClick = { reasoningMenu = true }) {
+                        Text(current, color = PetLlamaColors.Amber, fontWeight = FontWeight.SemiBold)
+                    }
+                    DropdownMenu(
+                        expanded = reasoningMenu,
+                        onDismissRequest = { reasoningMenu = false },
+                        modifier = Modifier.background(PetLlamaColors.SurfaceElevated)
+                    ) {
+                        reasoningChoices.forEach { choice ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        choice.label,
+                                        color = if (choice.id == reasoning) PetLlamaColors.Amber else PetLlamaColors.TextPrimary
+                                    )
+                                },
+                                onClick = {
+                                    reasoning = choice.id
+                                    reasoningMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1250,6 +1293,7 @@ fun ParamsSheet(
                     onMaxTokens(maxTok.toIntOrNull()?.takeIf { it > 0 })
                     onMaxToolCalls(maxTools.toIntOrNull()?.takeIf { it > 0 } ?: maxToolCalls)
                     onSystemPrompt(sys)
+                    onReasoningLevel(reasoning)
                     onDismiss()
                 },
                 shape = RoundedCornerShape(14.dp),

@@ -4,8 +4,8 @@ import android.content.Context
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.jimgrok.petllama.PetLlamaApp
 import com.jimgrok.petllama.GenerationGuard
+import com.jimgrok.petllama.PetLlamaApp
 import com.jimgrok.petllama.data.ConversationEntity
 import com.jimgrok.petllama.data.Db
 import com.jimgrok.petllama.data.McpServerEntity
@@ -24,7 +24,11 @@ import com.jimgrok.petllama.network.Msg
 import com.jimgrok.petllama.network.ToolCatalog
 import com.jimgrok.petllama.network.effectiveContextLength
 import com.jimgrok.petllama.network.explain
+import com.jimgrok.petllama.network.ReasoningChoice
+import com.jimgrok.petllama.network.parseContextSize
 import com.jimgrok.petllama.network.pickModelContextLength
+import com.jimgrok.petllama.network.reasoningChoicesFromProps
+import com.jimgrok.petllama.network.withReasoning
 import com.jimgrok.petllama.network.runToolLoop
 import com.jimgrok.petllama.network.toUserMessage
 import kotlinx.coroutines.CancellationException
@@ -70,6 +74,9 @@ class ChatViewModel : ViewModel() {
         val maxTokens: Int? = null,
         val maxToolCalls: Int = DEFAULT_MAX_TOOL_CALLS,
         val systemPrompt: String = "",
+        /** Id of a [ReasoningChoice]. "default" adds nothing to the request. */
+        val reasoningLevel: String = ReasoningChoice.Default.id,
+        val reasoningChoices: List<ReasoningChoice> = ReasoningChoice.fallback,
         /** When on, enabled MCP servers are offered to the model for this chat. */
         val toolsEnabled: Boolean = true,
         val tokensPerSecond: Double? = null,
@@ -101,6 +108,10 @@ class ChatViewModel : ViewModel() {
 
     /** Brief guard (ms) after Send starts so a stray tap on the swapping button does not abort immediately. */
     private var stopAllowedAtElapsedMs: Long = 0L
+    /** Parsed /props, reused when the user switches models on the same server. */
+    private var cachedPropsJson: String? = null
+    private var cachedPropsServerId: Long? = null
+    private val reasoningByModel = mutableMapOf<String, List<ReasoningChoice>>()
 
     init {
         loadChatParams()
@@ -122,6 +133,7 @@ class ChatViewModel : ViewModel() {
                     startLoad(serverId)
                 } else {
                     publishContext()
+                    applyReasoningForCurrentModel()
                 }
             }
             return
@@ -154,6 +166,7 @@ class ChatViewModel : ViewModel() {
                     )
                 }
                 publishContext()
+                applyReasoningForCurrentModel()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -168,8 +181,18 @@ class ChatViewModel : ViewModel() {
         propsJob = viewModelScope.launch {
             if (contextLoadedFor == serverId) return@launch
             val server = Db.servers.getById(serverId) ?: return@launch
+            val client = LlamaClient(server)
+            val props = try {
+                client.propsJson()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            cachedPropsJson = props
+            cachedPropsServerId = serverId
             val nCtx = try {
-                LlamaClient(server).propsOrSlotsContext()
+                props?.let { parseContextSize(it) } ?: client.slotsContext()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -178,13 +201,44 @@ class ChatViewModel : ViewModel() {
             contextLoadedFor = serverId
             propsContext = nCtx
             publishContext()
+            rememberReasoning(serverId, _state.value.selectedModel, reasoningChoicesFromProps(props))
         }
     }
 
     fun selectModel(id: String) {
         _state.update { it.copy(selectedModel = id, error = null) }
         publishContext()
+        applyReasoningForCurrentModel()
     }
+
+    private fun rememberReasoning(serverId: Long, modelId: String, choices: List<ReasoningChoice>) {
+        reasoningByModel[reasoningKey(serverId, modelId)] = choices
+        val st = _state.value
+        if (st.server?.id != serverId) return
+        if (modelId.isNotEmpty() && st.selectedModel.isNotEmpty() && st.selectedModel != modelId) return
+        publishReasoning(choices)
+    }
+
+    private fun applyReasoningForCurrentModel() {
+        val st = _state.value
+        val serverId = st.server?.id ?: return
+        val modelId = st.selectedModel
+        val exact = reasoningByModel[reasoningKey(serverId, modelId)]
+        val fromProps = if (cachedPropsServerId == serverId) reasoningChoicesFromProps(cachedPropsJson) else null
+        val choices = exact ?: fromProps ?: return
+        if (modelId.isNotEmpty()) reasoningByModel[reasoningKey(serverId, modelId)] = choices
+        publishReasoning(choices)
+    }
+
+    private fun publishReasoning(choices: List<ReasoningChoice>) {
+        val current = _state.value.reasoningLevel
+        val supported = choices.any { it.id == current }
+        val level = if (supported) current else ReasoningChoice.Default.id
+        _state.update { it.copy(reasoningChoices = choices, reasoningLevel = level) }
+        if (!supported) saveChatParams()
+    }
+
+    private fun reasoningKey(serverId: Long, modelId: String) = "$serverId|$modelId"
 
     /** Manual size, then llama-server n_ctx, then the selected model's /v1/models length. */
     private fun publishContext() {
@@ -302,16 +356,26 @@ class ChatViewModel : ViewModel() {
         saveChatParams()
     }
 
+    fun setReasoningLevel(id: String) {
+        val choice = _state.value.reasoningChoices.firstOrNull { it.id == id } ?: ReasoningChoice.Default
+        _state.update { it.copy(reasoningLevel = choice.id) }
+        saveChatParams()
+    }
+
     private fun loadChatParams() {
         val prefs = chatParamsPrefs() ?: return
         val storedMax = prefs.getInt(KEY_MAX_TOKENS, 0)
+        val savedReasoning = prefs.getString(KEY_REASONING, ReasoningChoice.Default.id)
+            ?.ifBlank { ReasoningChoice.Default.id }
+            ?: ReasoningChoice.Default.id
         _state.update { st ->
             st.copy(
                 temperature = prefs.getFloat(KEY_TEMPERATURE, st.temperature),
                 topP = prefs.getFloat(KEY_TOP_P, st.topP),
                 maxTokens = storedMax.takeIf { it > 0 },
                 maxToolCalls = prefs.getInt(KEY_MAX_TOOL_CALLS, st.maxToolCalls).coerceIn(1, 100),
-                systemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, st.systemPrompt) ?: st.systemPrompt
+                systemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, st.systemPrompt) ?: st.systemPrompt,
+                reasoningLevel = savedReasoning
             )
         }
     }
@@ -325,12 +389,14 @@ class ChatViewModel : ViewModel() {
             .putInt(KEY_MAX_TOKENS, st.maxTokens ?: 0)
             .putInt(KEY_MAX_TOOL_CALLS, st.maxToolCalls)
             .putString(KEY_SYSTEM_PROMPT, st.systemPrompt)
+            .putString(KEY_REASONING, st.reasoningLevel)
             .apply()
     }
 
     private fun chatParamsPrefs() = runCatching {
         PetLlamaApp.app.getSharedPreferences(CHAT_PARAMS_PREFS, Context.MODE_PRIVATE)
     }.getOrNull()
+
     fun setToolsEnabled(enabled: Boolean) = _state.update { it.copy(toolsEnabled = enabled) }
     fun clearError() = _state.update { it.copy(error = null) }
 
@@ -577,6 +643,8 @@ class ChatViewModel : ViewModel() {
                     llama = client,
                     messages = messages,
                     buildRequest = { msgs, tools ->
+                        val choice = s.reasoningChoices.firstOrNull { it.id == s.reasoningLevel }
+                            ?: ReasoningChoice.Default
                         ChatRequest(
                             model = model,
                             messages = msgs,
@@ -585,7 +653,7 @@ class ChatViewModel : ViewModel() {
                             topP = s.topP,
                             maxTokens = s.maxTokens,
                             tools = tools
-                        )
+                        ).withReasoning(choice)
                     },
                     maxToolCalls = s.maxToolCalls,
                     catalog = catalog,
@@ -706,6 +774,7 @@ class ChatViewModel : ViewModel() {
         const val KEY_MAX_TOKENS = "max_tokens"
         const val KEY_MAX_TOOL_CALLS = "max_tool_calls"
         const val KEY_SYSTEM_PROMPT = "system_prompt"
+        const val KEY_REASONING = "reasoning_level"
     }
 }
 
