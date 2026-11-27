@@ -1,8 +1,10 @@
 package com.jimgrok.petllama.ui.chat
 
+import android.content.Context
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.jimgrok.petllama.PetLlamaApp
 import com.jimgrok.petllama.GenerationGuard
 import com.jimgrok.petllama.data.ConversationEntity
 import com.jimgrok.petllama.data.Db
@@ -64,7 +66,8 @@ class ChatViewModel : ViewModel() {
         // params
         val temperature: Float = 0.7f,
         val topP: Float = 0.95f,
-        val maxTokens: Int = 512,
+        /** Null means Auto: the request omits max_tokens so reasoning models are not cut off. */
+        val maxTokens: Int? = null,
         val maxToolCalls: Int = DEFAULT_MAX_TOOL_CALLS,
         val systemPrompt: String = "",
         /** When on, enabled MCP servers are offered to the model for this chat. */
@@ -98,6 +101,10 @@ class ChatViewModel : ViewModel() {
 
     /** Brief guard (ms) after Send starts so a stray tap on the swapping button does not abort immediately. */
     private var stopAllowedAtElapsedMs: Long = 0L
+
+    init {
+        loadChatParams()
+    }
 
     fun init(serverId: Long) {
         // The screen calls this again after rotation or returning from ServersScreen.
@@ -267,12 +274,63 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun setTemperature(v: Float) = _state.update { it.copy(temperature = v) }
-    fun setTopP(v: Float) = _state.update { it.copy(topP = v) }
-    fun setMaxTokens(v: Int) = _state.update { it.copy(maxTokens = v) }
-    fun setMaxToolCalls(v: Int) = _state.update { it.copy(maxToolCalls = v.coerceIn(1, 100)) }
+    fun setTemperature(v: Float) {
+        _state.update { it.copy(temperature = v) }
+        saveChatParams()
+    }
+
+    fun setTopP(v: Float) {
+        _state.update { it.copy(topP = v) }
+        saveChatParams()
+    }
+
+    /** Zero or negative means Auto, so the request leaves max_tokens off. */
+    fun setMaxTokens(v: Int?) {
+        _state.update { it.copy(maxTokens = v?.takeIf { n -> n > 0 }) }
+        saveChatParams()
+    }
+
+    fun setMaxToolCalls(v: Int) {
+        _state.update { it.copy(maxToolCalls = v.coerceIn(1, 100)) }
+        saveChatParams()
+    }
+
     fun clearToolNotice() = _state.update { it.copy(toolNotice = null) }
-    fun setSystemPrompt(v: String) = _state.update { it.copy(systemPrompt = v) }
+
+    fun setSystemPrompt(v: String) {
+        _state.update { it.copy(systemPrompt = v) }
+        saveChatParams()
+    }
+
+    private fun loadChatParams() {
+        val prefs = chatParamsPrefs() ?: return
+        val storedMax = prefs.getInt(KEY_MAX_TOKENS, 0)
+        _state.update { st ->
+            st.copy(
+                temperature = prefs.getFloat(KEY_TEMPERATURE, st.temperature),
+                topP = prefs.getFloat(KEY_TOP_P, st.topP),
+                maxTokens = storedMax.takeIf { it > 0 },
+                maxToolCalls = prefs.getInt(KEY_MAX_TOOL_CALLS, st.maxToolCalls).coerceIn(1, 100),
+                systemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, st.systemPrompt) ?: st.systemPrompt
+            )
+        }
+    }
+
+    private fun saveChatParams() {
+        val prefs = chatParamsPrefs() ?: return
+        val st = _state.value
+        prefs.edit()
+            .putFloat(KEY_TEMPERATURE, st.temperature)
+            .putFloat(KEY_TOP_P, st.topP)
+            .putInt(KEY_MAX_TOKENS, st.maxTokens ?: 0)
+            .putInt(KEY_MAX_TOOL_CALLS, st.maxToolCalls)
+            .putString(KEY_SYSTEM_PROMPT, st.systemPrompt)
+            .apply()
+    }
+
+    private fun chatParamsPrefs() = runCatching {
+        PetLlamaApp.app.getSharedPreferences(CHAT_PARAMS_PREFS, Context.MODE_PRIVATE)
+    }.getOrNull()
     fun setToolsEnabled(enabled: Boolean) = _state.update { it.copy(toolsEnabled = enabled) }
     fun clearError() = _state.update { it.copy(error = null) }
 
@@ -639,6 +697,15 @@ class ChatViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    private companion object {
+        const val CHAT_PARAMS_PREFS = "petllama_chat_params"
+        const val KEY_TEMPERATURE = "temperature"
+        const val KEY_TOP_P = "top_p"
+        const val KEY_MAX_TOKENS = "max_tokens"
+        const val KEY_MAX_TOOL_CALLS = "max_tool_calls"
+        const val KEY_SYSTEM_PROMPT = "system_prompt"
     }
 }
 

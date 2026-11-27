@@ -1139,19 +1139,19 @@ private fun copyToClipboard(context: Context, text: String) {
 fun ParamsSheet(
     temperature: Float,
     topP: Float,
-    maxTokens: Int,
+    maxTokens: Int?,
     maxToolCalls: Int,
     systemPrompt: String,
     onTemperature: (Float) -> Unit,
     onTopP: (Float) -> Unit,
-    onMaxTokens: (Int) -> Unit,
+    onMaxTokens: (Int?) -> Unit,
     onMaxToolCalls: (Int) -> Unit,
     onSystemPrompt: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var temp by remember { mutableStateOf(temperature) }
     var top by remember { mutableStateOf(topP) }
-    var maxTok by remember { mutableStateOf(maxTokens.toString()) }
+    var maxTok by remember { mutableStateOf(maxTokens?.toString().orEmpty()) }
     var maxTools by remember { mutableStateOf(maxToolCalls.toString()) }
     var sys by remember { mutableStateOf(systemPrompt) }
 
@@ -1216,6 +1216,7 @@ fun ParamsSheet(
                     value = maxTok,
                     onValueChange = { raw -> maxTok = raw.filter { it.isDigit() } },
                     label = { Text("Max tokens") },
+                    placeholder = { Text("Auto", color = PetLlamaColors.TextMuted) },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp),
                     colors = petLlamaFieldColors(),
@@ -1246,7 +1247,7 @@ fun ParamsSheet(
                 onClick = {
                     onTemperature(temp)
                     onTopP(top)
-                    onMaxTokens(maxTok.toIntOrNull()?.takeIf { it > 0 } ?: maxTokens)
+                    onMaxTokens(maxTok.toIntOrNull()?.takeIf { it > 0 })
                     onMaxToolCalls(maxTools.toIntOrNull()?.takeIf { it > 0 } ?: maxToolCalls)
                     onSystemPrompt(sys)
                     onDismiss()
