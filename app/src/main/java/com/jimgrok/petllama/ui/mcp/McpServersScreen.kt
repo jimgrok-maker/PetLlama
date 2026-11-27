@@ -235,7 +235,10 @@ fun McpServersScreen(
 
             item {
                 Spacer(Modifier.height(6.dp))
-                PresetSection(onAdd = { preset, url -> viewModel.addPreset(preset, url) })
+                PresetSection(
+                    servers = state.servers,
+                    onAdd = { preset, url -> viewModel.addPreset(preset, url) }
+                )
             }
         }
     }
@@ -272,7 +275,10 @@ fun McpServersScreen(
 }
 
 @Composable
-private fun PresetSection(onAdd: (McpPreset, String) -> Boolean) {
+private fun PresetSection(
+    servers: List<com.jimgrok.petllama.data.McpServerEntity>,
+    onAdd: (McpPreset, String) -> Boolean
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Built-in LAN presets", style = MaterialTheme.typography.titleMedium, color = PetLlamaColors.TextPrimary)
         Text(
@@ -281,13 +287,21 @@ private fun PresetSection(onAdd: (McpPreset, String) -> Boolean) {
             style = MaterialTheme.typography.bodySmall
         )
         McpPresets.all.forEach { preset ->
-            PresetCard(preset = preset, onAdd = { url -> onAdd(preset, url) })
+            PresetCard(
+                preset = preset,
+                alreadyAdded = preset.isAlreadySaved(servers),
+                onAdd = { url -> onAdd(preset, url) }
+            )
         }
     }
 }
 
 @Composable
-private fun PresetCard(preset: McpPreset, onAdd: (String) -> Boolean) {
+private fun PresetCard(
+    preset: McpPreset,
+    alreadyAdded: Boolean,
+    onAdd: (String) -> Boolean
+) {
     var url by remember(preset.id) { mutableStateOf(preset.defaultUrl) }
     var showSetup by remember(preset.id) { mutableStateOf(false) }
     var urlError by remember(preset.id) { mutableStateOf<String?>(null) }
@@ -397,21 +411,26 @@ private fun PresetCard(preset: McpPreset, onAdd: (String) -> Boolean) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                val added = alreadyAdded || justAdded
                 Button(
                     onClick = {
+                        if (alreadyAdded) return@Button
                         if (onAdd(url)) {
                             justAdded = true
                         } else {
                             urlError = "Type a URL first."
                         }
                     },
+                    enabled = !alreadyAdded,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (justAdded) PetLlamaColors.Emerald else PetLlamaColors.SurfaceElevated,
-                        contentColor = if (justAdded) PetLlamaColors.AmberOn else PetLlamaColors.TextPrimary
+                        containerColor = if (added) PetLlamaColors.Emerald else PetLlamaColors.SurfaceElevated,
+                        contentColor = if (added) PetLlamaColors.AmberOn else PetLlamaColors.TextPrimary,
+                        disabledContainerColor = PetLlamaColors.Emerald,
+                        disabledContentColor = PetLlamaColors.AmberOn
                     )
                 ) {
-                    if (justAdded) {
+                    if (added) {
                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(5.dp))
                         Text("Added", fontWeight = FontWeight.SemiBold)
